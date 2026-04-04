@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenAI 注册控制台</title>
+  <style>
+    :root {
+      --bg: #f6f4ef;
+      --card: #fffdf8;
+      --ink: #1f2328;
+      --muted: #5a616b;
+      --line: #dad5c9;
+      --accent: #0f766e;
+      --accent-2: #0b5c56;
+      --danger: #b42318;
+      --ok: #166534;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
+      background:
+        radial-gradient(1200px 600px at -10% -10%, #fbe9d1 0%, transparent 60%),
+        radial-gradient(1000px 600px at 110% 10%, #d9ecea 0%, transparent 55%),
+        var(--bg);
+      color: var(--ink);
+    }
+
+    .wrap {
+      max-width: 980px;
+      margin: 24px auto;
+      padding: 0 14px 24px;
+    }
+
+    .title {
+      font-family: "Space Grotesk", "Noto Sans SC", sans-serif;
+      font-size: 28px;
+      font-weight: 700;
+      margin: 8px 0 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    @media (min-width: 900px) {
+      .grid {
+        grid-template-columns: 360px 1fr;
+      }
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      box-shadow: 0 6px 24px rgba(20, 26, 34, 0.06);
+    }
+
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 16px;
+    }
+
+    .row { margin-bottom: 10px; }
+    .row label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    input, select {
+      width: 100%;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn-start { background: var(--accent); color: white; }
+    .btn-start:hover { background: var(--accent-2); }
+    .btn-stop { background: #efe8dd; color: var(--danger); }
+    .btn-refresh { background: #ece9e1; color: #2c333a; }
+
+    .status {
+      font-size: 13px;
+      color: var(--muted);
+      margin: 8px 0;
+      white-space: pre-wrap;
+    }
+
+    .status .ok { color: var(--ok); font-weight: 600; }
+    .status .bad { color: var(--danger); font-weight: 600; }
+
+    .logs {
+      min-height: 520px;
+      max-height: 72vh;
+      overflow: auto;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #1f29371f;
+      background: #12161d;
+      color: #e8edf2;
+      font-family: "JetBrains Mono", "Consolas", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    .preset-list {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .preset-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fcfaf4;
+      padding: 8px;
+    }
+
+    .preset-item .name {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+
+    .preset-item .desc {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .preset-item button {
+      padding: 6px 10px;
+      font-size: 12px;
+      border-radius: 6px;
+      background: #e3f2ef;
+      color: #0c5f58;
+    }
+
+    .history {
+      margin-top: 10px;
+      border-top: 1px dashed var(--line);
+      padding-top: 10px;
+      max-height: 220px;
+      overflow: auto;
+      font-size: 12px;
+    }
+
+    .history-item {
+      border: 1px solid #e7e2d7;
+      border-radius: 8px;
+      background: #fffcf5;
+      padding: 6px 8px;
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">OpenAI 注册控制台</div>
+    <div class="grid">
+      <section class="card">
+        <h2>任务参数</h2>
+        <div class="preset-list" id="presetList"></div>
+        <div class="row">
+          <label for="emailMode">邮箱模式</label>
+          <select id="emailMode">
+            <option value="">读取 .env</option>
+            <option value="luckmail">luckmail</option>
+            <option value="gmail">gmail</option>
+            <option value="hotmail007">hotmail007</option>
+            <option value="cf">cf</option>
+            <option value="file">file</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="count">数量 (留空=once)</label>
+          <input id="count" type="number" min="1" placeholder="1" />
+        </div>
+        <div class="row">
+          <label for="threads">线程数</label>
+          <input id="threads" type="number" min="1" placeholder="1" />
+        </div>
+        <div class="row">
+          <label for="proxy">单代理</label>
+          <input id="proxy" type="text" placeholder="http://127.0.0.1:7897" />
+        </div>
+        <div class="row">
+          <label for="proxyFile">代理文件</label>
+          <input id="proxyFile" type="text" placeholder="proxies.txt" />
+        </div>
+        <div class="row">
+          <label for="sleepMin">sleep-min</label>
+          <input id="sleepMin" type="number" min="1" placeholder="5" />
+        </div>
+        <div class="row">
+          <label for="sleepMax">sleep-max</label>
+          <input id="sleepMax" type="number" min="1" placeholder="30" />
+        </div>
+        <div class="actions">
+          <button class="btn-start" id="startBtn">开始</button>
+          <button class="btn-stop" id="stopBtn">停止</button>
+          <button class="btn-refresh" id="refreshBtn">刷新</button>
+        </div>
+        <div class="status" id="statusText">加载中...</div>
+        <div class="meta" id="configText"></div>
+        <div class="history" id="history"></div>
+      </section>
+
+      <section class="card">
+        <h2>实时日志</h2>
+        <div class="logs" id="logs"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+
+    function toInt(v) {
+      if (!v) return null;
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    let refreshTimer = null;
+    let refreshInFlight = false;
+
+    async function getJson(url, opts) {
+      const r = await fetch(url, opts);
+      const t = await r.text();
+      let data = {};
+      try { data = t ? JSON.parse(t) : {}; } catch (_) {}
+      if (!r.ok) {
+        throw new Error(data.detail || t || ("HTTP " + r.status));
+      }
+      return data;
+    }
+
+    function buildPayload() {
+      const count = toInt(el("count").value.trim());
+      return {
+        once: !count,
+        count,
+        threads: toInt(el("threads").value.trim()),
+        proxy: el("proxy").value.trim() || null,
+        proxy_file: el("proxyFile").value.trim() || null,
+        email_mode: el("emailMode").value || null,
+        sleep_min: toInt(el("sleepMin").value.trim()),
+        sleep_max: toInt(el("sleepMax").value.trim()),
+      };
+    }
+
+    function formatTs(sec) {
+      if (!sec) return "-";
+      return new Date(sec * 1000).toLocaleString();
+    }
+
+    async function refreshStatus() {
+      const s = await getJson("/api/status");
+      const running = s.running ? "<span class='ok'>运行中</span>" : "<span class='bad'>已停止</span>";
+      el("statusText").innerHTML =
+        "状态: " + running + "\n" +
+        "运行ID: " + (s.run_id || "-") + "\n" +
+        "PID: " + (s.pid || "-") + "\n" +
+        "返回码: " + (s.returncode ?? "-") + "\n" +
+        "开始时间: " + formatTs(s.started_at) + "\n" +
+        "结束时间: " + formatTs(s.ended_at) + "\n" +
+        "日志行数: " + (s.log_lines || 0);
+    }
+
+    async function refreshLogs() {
+      const data = await getJson("/api/logs?lines=500");
+      el("logs").textContent = (data.lines || []).join("\n");
+      el("logs").scrollTop = el("logs").scrollHeight;
+    }
+
+    async function refreshConfig() {
+      const c = await getJson("/api/config");
+      const d = c.defaults || {};
+      el("configText").textContent =
+        "默认配置: email_mode=" + (d.email_mode || "-") +
+        " | proxy=" + (d.proxy || "-") +
+        " | proxy_file=" + (d.proxy_file || "-") +
+        " | cpa_api_url=" + (d.cpa_api_url || "-");
+    }
+
+    function renderHistory(items) {
+      const rows = (items || []).map((it) => {
+        const status = it.status || "-";
+        const count = (it.request && it.request.count) ? it.request.count : "once";
+        const mode = (it.request && it.request.email_mode) || "env";
+        return "<div class='history-item'>" +
+          "#" + it.run_id + " | " + status +
+          " | mode=" + mode +
+          " | count=" + count +
+          " | rc=" + (it.returncode ?? "-") +
+          "<br>" + formatTs(it.started_at) + " -> " + formatTs(it.ended_at) +
+          "</div>";
+      });
+      el("history").innerHTML = "<strong>任务历史</strong><br>" + (rows.join("") || "暂无记录");
+    }
+
+    async function refreshHistory() {
+      const data = await getJson("/api/history?limit=12");
+      renderHistory(data.items || []);
+    }
+
+    function fillFromPayload(payload) {
+      if (!payload) return;
+      el("emailMode").value = payload.email_mode || "";
+      el("count").value = payload.count || "";
+      el("threads").value = payload.threads || "";
+      el("proxy").value = payload.proxy || "";
+      el("proxyFile").value = payload.proxy_file || "";
+      el("sleepMin").value = payload.sleep_min || "";
+      el("sleepMax").value = payload.sleep_max || "";
+    }
+
+    function renderPresets(items) {
+      const html = (items || []).map((it) => {
+        return "<div class='preset-item'>" +
+          "<div class='name'>" + (it.title || it.name) + "</div>" +
+          "<div class='desc'>" + (it.description || "") + "</div>" +
+          "<button data-action='fill' data-name='" + it.name + "'>填入参数</button> " +
+          "<button data-action='run' data-name='" + it.name + "'>一键启动</button>" +
+          "</div>";
+      }).join("");
+      el("presetList").innerHTML = html || "";
+      const byName = {};
+      (items || []).forEach((it) => {
+        byName[it.name] = it;
+      });
+      el("presetList").onclick = async (evt) => {
+        const btn = evt.target;
+        if (!btn || !btn.dataset || !btn.dataset.name) return;
+        const item = byName[btn.dataset.name];
+        if (!item) return;
+        if (btn.dataset.action === "fill") {
+          fillFromPayload(item.payload || {});
+          return;
+        }
+        if (btn.dataset.action === "run") {
+          const allowRestart = window.confirm("如果已有任务在运行，是否先停止再启动预设？\n点击确定=自动重启，取消=只在空闲时启动。");
+          try {
+            await getJson("/api/start-preset", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: item.name, force_restart: allowRestart }),
+            });
+            await fullRefresh();
+          } catch (e) {
+            alert("预设启动失败: " + e.message);
+          }
+        }
+      };
+    }
+
+    async function refreshPresets() {
+      const data = await getJson("/api/presets");
+      renderPresets(data.items || []);
+    }
+
+    async function fullRefresh() {
+      await Promise.all([refreshStatus(), refreshLogs(), refreshHistory()]);
+    }
+
+    el("startBtn").addEventListener("click", async () => {
+      try {
+        await getJson("/api/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildPayload()),
+        });
+        await fullRefresh();
+      } catch (e) {
+        alert("启动失败: " + e.message);
+      }
+    });
+
+    el("stopBtn").addEventListener("click", async () => {
+      try {
+        await getJson("/api/stop", { method: "POST" });
+        await fullRefresh();
+      } catch (e) {
+        alert("停止失败: " + e.message);
+      }
+    });
+
+    el("refreshBtn").addEventListener("click", async () => {
+      await fullRefresh();
+    });
+
+    function startPolling() {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+      }
+      refreshTimer = setInterval(async () => {
+        if (refreshInFlight) return;
+        refreshInFlight = true;
+        try {
+          await fullRefresh();
+        } catch (_) {
+        } finally {
+          refreshInFlight = false;
+        }
+      }, 3000);
+    }
+
+    (async () => {
+      await refreshPresets();
+      await refreshConfig();
+      await fullRefresh();
+      startPolling();
+    })();
+  </script>
+</body>
+</html>
