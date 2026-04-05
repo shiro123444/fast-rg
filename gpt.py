@@ -1155,7 +1155,9 @@ def _to_int(v: Any) -> int:
         return 0
 
 
-def _post_form(url: str, data: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
+def _post_form(
+    url: str, data: Dict[str, str], timeout: int = 30, proxies: Any = None
+) -> Dict[str, Any]:
     body = urllib.parse.urlencode(data).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -1170,7 +1172,22 @@ def _post_form(url: str, data: Dict[str, str], timeout: int = 30) -> Dict[str, A
         context = None
         if not _ssl_verify():
             context = ssl._create_unverified_context()
-        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+        opener = None
+        if proxies and isinstance(proxies, dict):
+            proxy_map: Dict[str, str] = {}
+            http_proxy = str(proxies.get("http") or "").strip()
+            https_proxy = str(proxies.get("https") or "").strip()
+            if http_proxy:
+                proxy_map["http"] = http_proxy
+            if https_proxy:
+                proxy_map["https"] = https_proxy
+            if proxy_map:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy_map))
+        if opener is not None:
+            resp_ctx = opener.open(req, timeout=timeout)
+        else:
+            resp_ctx = urllib.request.urlopen(req, timeout=timeout, context=context)
+        with resp_ctx as resp:
             raw = resp.read()
             if resp.status != 200:
                 raise RuntimeError(
@@ -1267,6 +1284,7 @@ def submit_callback_url(
     expected_state: str,
     code_verifier: str,
     redirect_uri: str = DEFAULT_REDIRECT_URI,
+    proxies: Any = None,
 ) -> str:
     cb = _parse_callback_url(callback_url)
     if cb["error"]:
@@ -1289,6 +1307,7 @@ def submit_callback_url(
             "redirect_uri": redirect_uri,
             "code_verifier": code_verifier,
         },
+        proxies=proxies,
     )
 
     access_token = (token_resp.get("access_token") or "").strip()
@@ -1982,6 +2001,7 @@ def run(proxy: Optional[str]) -> tuple:
                     code_verifier=oauth.code_verifier,
                     redirect_uri=oauth.redirect_uri,
                     expected_state=oauth.state,
+                    proxies=proxies,
                 )
                 return token_json, password
             current_url = next_url
