@@ -54,6 +54,21 @@ name=backup;base_url=http://1.2.3.4:8317;token=yyyy;target_type=codex;min_candid
 
 然后再计算缺口并补号。
 
+## LuckMail 死号防护（已支持）
+
+- 购买邮箱后，注册前先调用 `check_token_alive` 进行可用性检测
+- 检测失败自动重买，不进入注册流程
+- 超时收不到 OTP（默认 60 秒）会触发重买并立即重试
+
+可配置项（`.env`）：
+
+```env
+LUCKMAIL_OTP_TIMEOUT=60
+LUCKMAIL_PRECHECK_ENABLED=1
+LUCKMAIL_PRECHECK_RETRIES=2
+LUCKMAIL_PURCHASE_MAX_ATTEMPTS=6
+```
+
 ## 快速启动
 
 1) 安装依赖

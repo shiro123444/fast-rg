@@ -86,6 +86,14 @@ LUCKMAIL_API_KEY = os.getenv("LUCKMAIL_API_KEY", "").strip()
 LUCKMAIL_PROJECT_CODE = os.getenv("LUCKMAIL_PROJECT_CODE", "openai").strip() or "openai"
 LUCKMAIL_EMAIL_TYPE = os.getenv("LUCKMAIL_EMAIL_TYPE", "").strip()
 LUCKMAIL_DOMAIN = os.getenv("LUCKMAIL_DOMAIN", "").strip()
+LUCKMAIL_OTP_TIMEOUT = int(os.getenv("LUCKMAIL_OTP_TIMEOUT", "60") or "60")
+LUCKMAIL_PRECHECK_ENABLED = os.getenv(
+    "LUCKMAIL_PRECHECK_ENABLED", "1"
+).strip().lower() not in {"0", "false", "no"}
+LUCKMAIL_PRECHECK_RETRIES = int(os.getenv("LUCKMAIL_PRECHECK_RETRIES", "2") or "2")
+LUCKMAIL_PURCHASE_MAX_ATTEMPTS = int(
+    os.getenv("LUCKMAIL_PURCHASE_MAX_ATTEMPTS", "6") or "6"
+)
 
 
 def _load_proxies(filepath: str) -> List[str]:
@@ -213,25 +221,73 @@ def get_email_and_token(proxies: Any = None) -> tuple:
     if EMAIL_MODE == "luckmail":
         try:
             client = _get_luckmail_client()
-            result = client.user.purchase_emails(
-                project_code=LUCKMAIL_PROJECT_CODE,
-                quantity=1,
-                email_type=LUCKMAIL_EMAIL_TYPE or None,
-                domain=LUCKMAIL_DOMAIN or None,
-            )
-            purchases = (result or {}).get("purchases") or []
-            if not purchases:
-                print(f"[Error] LuckMail 购买邮箱返回为空: {result}")
-                return "", ""
-            item = purchases[0] or {}
-            email = str(item.get("email_address") or "").strip()
-            token = str(item.get("token") or "").strip()
-            if not email or not token:
-                print(f"[Error] LuckMail 返回缺少 email/token: {item}")
-                return "", ""
-            _luckmail_token_by_email[email] = token
-            print(f"[*] LuckMail 购买邮箱成功: {email}")
-            return email, token
+            max_attempts = max(1, int(LUCKMAIL_PURCHASE_MAX_ATTEMPTS or 1))
+            for purchase_attempt in range(1, max_attempts + 1):
+                result = client.user.purchase_emails(
+                    project_code=LUCKMAIL_PROJECT_CODE,
+                    quantity=1,
+                    email_type=LUCKMAIL_EMAIL_TYPE or None,
+                    domain=LUCKMAIL_DOMAIN or None,
+                )
+                purchases = (result or {}).get("purchases") or []
+                if not purchases:
+                    print(f"[Error] LuckMail 购买邮箱返回为空: {result}")
+                    return "", ""
+
+                item = purchases[0] or {}
+                email = str(item.get("email_address") or "").strip()
+                token = str(item.get("token") or "").strip()
+                purchase_id = item.get("id")
+                if not email or not token:
+                    print(f"[Error] LuckMail 返回缺少 email/token: {item}")
+                    return "", ""
+
+                print(
+                    f"[*] LuckMail 购买邮箱成功: {email} (attempt {purchase_attempt}/{max_attempts})"
+                )
+
+                if not LUCKMAIL_PRECHECK_ENABLED:
+                    _luckmail_token_by_email[email] = token
+                    return email, token
+
+                alive_ok = False
+                last_msg = ""
+                retries = max(0, int(LUCKMAIL_PRECHECK_RETRIES or 0))
+                for chk in range(retries + 1):
+                    try:
+                        alive = client.user.check_token_alive(token)
+                        is_alive = bool(getattr(alive, "alive", False))
+                        mail_count = getattr(alive, "mail_count", None)
+                        status = str(getattr(alive, "status", "") or "")
+                        message = str(getattr(alive, "message", "") or "")
+                        if is_alive:
+                            print(
+                                f"[*] LuckMail 可用性检测通过: alive={is_alive}, mail_count={mail_count}, status={status}"
+                            )
+                            alive_ok = True
+                            break
+                        last_msg = f"alive={is_alive}, mail_count={mail_count}, status={status}, message={message}"
+                    except Exception as e:
+                        last_msg = str(e)
+                    if chk < retries:
+                        time.sleep(1)
+
+                if alive_ok:
+                    _luckmail_token_by_email[email] = token
+                    return email, token
+
+                print(f"[Warn] LuckMail 可用性检测未通过，重买邮箱: {last_msg}")
+                try:
+                    if purchase_id:
+                        client.user.set_purchase_disabled(int(purchase_id), 1)
+                        print(
+                            f"[*] 已将疑似死号标记禁用: purchase_id={purchase_id}, email={email}"
+                        )
+                except Exception as e:
+                    print(f"[Warn] 标记禁用失败: {e}")
+
+            print("[Error] LuckMail 连续多次购买均未通过可用性检测")
+            return "", ""
         except Exception as e:
             print(f"[Error] LuckMail 获取邮箱失败: {e}")
             return "", ""
@@ -325,30 +381,80 @@ def get_oai_code(
             if not lm_token:
                 print(f"[Error] LuckMail 未找到 {email} 对应 token")
                 return ""
+            print(
+                f"[*] LuckMail 开始轮询验证码 (邮箱: {email}, token: {lm_token[:10]}..., 收件直连不走注册代理)"
+            )
             before_ids = set(seen_ids or set())
             start = time.time()
-            timeout_sec = 180
+            timeout_sec = max(20, int(LUCKMAIL_OTP_TIMEOUT or 60))
+            poll_count = 0
             while time.time() - start < timeout_sec:
-                mail_list = client.user.get_token_mails(lm_token)
-                mails = getattr(mail_list, "mails", []) or []
-                for mail in mails:
-                    msg_id = str(getattr(mail, "message_id", "") or "")
-                    if msg_id and msg_id in before_ids:
-                        continue
-                    if msg_id:
-                        before_ids.add(msg_id)
-                    content = " ".join(
-                        [
-                            str(getattr(mail, "subject", "") or ""),
-                            str(getattr(mail, "body", "") or ""),
-                            str(getattr(mail, "html_body", "") or ""),
-                        ]
+                poll_count += 1
+                try:
+                    mail_list = client.user.get_token_mails(lm_token)
+                    mails = getattr(mail_list, "mails", []) or []
+                    if mails and (poll_count <= 3 or poll_count % 10 == 0):
+                        latest = mails[0]
+                        latest_subj = str(getattr(latest, "subject", "") or "")[:80]
+                        latest_from = str(getattr(latest, "from_addr", "") or "")[:80]
+                        print(
+                            f"[*] LuckMail 轮询#{poll_count}: mails={len(mails)}, latest_from={latest_from}, latest_subject={latest_subj}"
+                        )
+                    elif (not mails) and poll_count % 10 == 0:
+                        print(f"[*] LuckMail 轮询#{poll_count}: 暂无邮件")
+
+                    for mail in mails:
+                        msg_id = str(getattr(mail, "message_id", "") or "")
+                        if msg_id and msg_id in before_ids:
+                            continue
+                        if msg_id:
+                            before_ids.add(msg_id)
+                        content = " ".join(
+                            [
+                                str(getattr(mail, "subject", "") or ""),
+                                str(getattr(mail, "body", "") or ""),
+                                str(getattr(mail, "html_body", "") or ""),
+                            ]
+                        )
+                        code = _extract_otp_code(content)
+                        if code:
+                            print(f"[*] LuckMail 抓到验证码(get_token_mails): {code}")
+                            return code
+                except Exception as e:
+                    if poll_count <= 3 or poll_count % 10 == 0:
+                        print(f"[Warn] LuckMail get_token_mails 异常: {e}")
+
+                # 兜底: 直接调 token/code 接口，避免邮件列表延迟导致错过 OTP
+                try:
+                    code_result = client.user.get_token_code(lm_token)
+                    has_new_mail = bool(getattr(code_result, "has_new_mail", False))
+                    direct_code = str(
+                        getattr(code_result, "verification_code", "") or ""
                     )
-                    code = _extract_otp_code(content)
-                    if code:
-                        print(f"[*] LuckMail 抓到验证码: {code}")
-                        return code
+                    if direct_code:
+                        m = re.search(r"(?<!\d)(\d{6})(?!\d)", direct_code)
+                        final_code = m.group(1) if m else direct_code
+                        print(f"[*] LuckMail 抓到验证码(get_token_code): {final_code}")
+                        return final_code
+                    if has_new_mail and (poll_count <= 3 or poll_count % 10 == 0):
+                        print(
+                            f"[*] LuckMail get_token_code 提示有新邮件，但暂未提取到验证码"
+                        )
+                except Exception as e:
+                    if poll_count <= 3 or poll_count % 10 == 0:
+                        print(f"[Warn] LuckMail get_token_code 异常: {e}")
+
                 time.sleep(3)
+
+            # 超时后做一次诊断，帮助定位是没来信还是 token 本身失效
+            try:
+                alive = client.user.check_token_alive(lm_token)
+                print(
+                    f"[Diag] LuckMail alive={getattr(alive, 'alive', None)}, mail_count={getattr(alive, 'mail_count', None)}, status={getattr(alive, 'status', '')}, message={getattr(alive, 'message', '')}"
+                )
+            except Exception as e:
+                print(f"[Diag] LuckMail check_token_alive 异常: {e}")
+
             print("[Error] LuckMail 等待验证码超时")
             return ""
         except Exception as e:
@@ -1450,6 +1556,7 @@ def run(proxy: Optional[str]) -> tuple:
 
             processed_mails = set()
             code = ""
+            need_rebuy = False
             for otp_attempt in range(5):
                 if otp_attempt > 0:
                     print(f"\n[*] OTP 重试 {otp_attempt}/5，重新发送验证码...")
@@ -1478,6 +1585,14 @@ def run(proxy: Optional[str]) -> tuple:
                 )
                 if code:
                     break
+                if EMAIL_MODE == "luckmail":
+                    print(
+                        f"[Warn] LuckMail 本轮等待超时({LUCKMAIL_OTP_TIMEOUT}s)，触发重买邮箱 (attempt {otp_attempt + 1}/5)"
+                    )
+                    need_rebuy = True
+                    break
+            if need_rebuy:
+                return "retry_rebuy", None
             if not code:
                 print("[Error] 多次重试后仍未收到验证码，跳过")
                 return None, None
@@ -1595,6 +1710,7 @@ def run(proxy: Optional[str]) -> tuple:
                 if "otp" in pwd_page or "verify" in pwd_continue:
                     print("[*] 登录触发二次邮箱验证，等待验证码...")
                     code2 = ""
+                    need_rebuy2 = False
                     for otp2_attempt in range(5):
                         if otp2_attempt > 0:
                             print(f"\n[*] 二次 OTP 重试 {otp2_attempt}/5，重新发送...")
@@ -1623,6 +1739,14 @@ def run(proxy: Optional[str]) -> tuple:
                         )
                         if code2:
                             break
+                        if EMAIL_MODE == "luckmail":
+                            print(
+                                f"[Warn] LuckMail 二次OTP等待超时({LUCKMAIL_OTP_TIMEOUT}s)，触发重买邮箱 (attempt {otp2_attempt + 1}/5)"
+                            )
+                            need_rebuy2 = True
+                            break
+                    if need_rebuy2:
+                        return "retry_rebuy", None
                     if not code2:
                         print("[Error] 二次验证码获取失败")
                         return None, None
@@ -2230,6 +2354,14 @@ def _worker(
                     with _success_counter_lock:
                         remaining[0] += 1
                 time.sleep(10)
+                continue
+
+            if token_json == "retry_rebuy":
+                print(f"{tag} LuckMail 超时触发重买，立即重试...")
+                if remaining is not None:
+                    with _success_counter_lock:
+                        remaining[0] += 1
+                time.sleep(1)
                 continue
 
             if token_json:

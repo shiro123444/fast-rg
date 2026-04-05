@@ -9,6 +9,7 @@ config.json
 accounts.txt
 token_*.json
 logs/
+.maintainer_run_state.json
 
 __pycache__/
 *.py[cod]
