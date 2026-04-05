@@ -1,6 +1,5 @@
 # GPT 注册机 OSS 修复版
 
-这是一个“大工程移植版”：
 
 - 前端面板和运行形态参考 `OSS修复3.30`（配置面板 + 监控台 + 循环补号）
 - 注册核心逻辑使用当前仓库的 `gpt.py`（保留你现有 luckmail/gmail/hotmail007/file/cf 注册能力）
@@ -9,7 +8,7 @@
 
 ## 目录结构
 
-- `gpt.py`: 你的核心注册逻辑（未替换）
+- `gpt.py`: 核心注册逻辑（未替换）
 - `api_server.py`: 控制台后端 API（含管理令牌鉴权）
 - `auto_pool_maintainer.py`: 号池维护/循环补号调度
 - `config.json`: 当前运行配置
@@ -141,8 +140,4 @@ python api_server.py
 - `mail.provider`: 邮箱模式
 - `luckmail/gmail/hotmail007/file_mail/cfmail`: 对应模式参数
 
-## 说明
 
-- 这个版本的“自动维护与循环补号”已经接入你的 `gpt.py`。
-- 前端已做适配，支持 luckmail/gmail 等你要求的模式。
-- 若你需要我继续做“与旧 OSS 完全字段一比一兼容”（包括所有旧 provider 字段保留映射），我可以在此基础上再做一轮兼容层。
