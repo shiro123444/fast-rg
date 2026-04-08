@@ -51,6 +51,17 @@
     "mail_type": "outlook Trusted Graph",
     "mail_mode": "imap"
   },
+  "outlook_api": {
+    "api_url": "https://your-domain.example",
+    "accounts_file": "outlook_accounts.txt",
+    "client_id": "",
+    "refresh_token": "",
+    "num": 1,
+    "box_type": 1,
+    "timeout_seconds": 15,
+    "poll_interval_seconds": 3,
+    "otp_timeout_seconds": 120
+  },
   "file_mail": {
     "accounts_file": "accounts.txt"
   },

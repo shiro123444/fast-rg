@@ -6,6 +6,8 @@ import type {
   PoolConnectionTestResponse,
   StartRuntimeResponse,
   StopRuntimeResponse,
+  TaobaoPoolMutationResponse,
+  TaobaoPoolSnapshot,
 } from "../types/api";
 import type { ConfigSection, MonitorState } from "../types/runtime";
 
@@ -135,5 +137,30 @@ export async function testPoolConnection(payload: {
   return getJson<PoolConnectionTestResponse>("/api/runtime/test-pool", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchTaobaoPoolSnapshot(): Promise<TaobaoPoolSnapshot> {
+  return getJson<TaobaoPoolSnapshot>("/api/mail/taobao-pool");
+}
+
+export async function importTaobaoPoolText(text: string): Promise<TaobaoPoolMutationResponse> {
+  return getJson<TaobaoPoolMutationResponse>("/api/mail/taobao-pool/import", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function requeueTaobaoPool(emails: string[]): Promise<TaobaoPoolMutationResponse> {
+  return getJson<TaobaoPoolMutationResponse>("/api/mail/taobao-pool/requeue", {
+    method: "POST",
+    body: JSON.stringify({ emails }),
+  });
+}
+
+export async function abandonTaobaoPool(emails: string[]): Promise<TaobaoPoolMutationResponse> {
+  return getJson<TaobaoPoolMutationResponse>("/api/mail/taobao-pool/abandon", {
+    method: "POST",
+    body: JSON.stringify({ emails }),
   });
 }

@@ -319,6 +319,25 @@ input[type="number"]:focus {
   box-shadow: 0 0 0 3px rgba(115, 164, 224, 0.14);
 }
 
+textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px 12px;
+  border: 1px solid #d6e2f0;
+  border-radius: 11px;
+  background: #fff;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  resize: vertical;
+  outline: none;
+}
+
+textarea:focus {
+  border-color: #8eb8ef;
+  box-shadow: 0 0 0 3px rgba(115, 164, 224, 0.14);
+}
+
 .checkbox-group {
   margin-top: 4px;
 }
@@ -432,6 +451,77 @@ input[type="number"]:focus {
   padding: 8px 14px;
   font-size: 14px;
   font-weight: 600;
+}
+
+.taobao-group {
+  margin-top: 14px;
+}
+
+.taobao-content {
+  display: grid;
+  gap: 12px;
+}
+
+.taobao-summary {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #58779b;
+}
+
+.taobao-summary span {
+  padding: 4px 8px;
+  border: 1px solid #d8e6f4;
+  border-radius: 999px;
+  background: #f3f8fd;
+}
+
+.taobao-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.taobao-lists {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.taobao-list {
+  border: 1px solid #dce8f5;
+  border-radius: 11px;
+  background: #f8fbff;
+  min-height: 160px;
+  overflow: hidden;
+}
+
+.taobao-list-title {
+  padding: 8px 10px;
+  border-bottom: 1px solid #dce8f5;
+  font-size: 12px;
+  font-weight: 700;
+  color: #4f7196;
+  background: #f0f6fc;
+}
+
+.taobao-list-body {
+  max-height: 240px;
+  overflow: auto;
+}
+
+.taobao-item {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #e5eef8;
+  font-size: 12px;
+  color: #2b4768;
+}
+
+.taobao-item small {
+  color: #8ea4be;
 }
 
 .link-button {
@@ -831,6 +921,10 @@ tbody tr:hover {
   }
 
   .timing-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .taobao-lists {
     grid-template-columns: 1fr;
   }
 

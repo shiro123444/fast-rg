@@ -24,6 +24,7 @@ import urllib.error
 
 from curl_cffi import requests
 from curl_cffi import CurlMime
+from taobao_pool import TaobaoMailboxPool
 
 # ==========================================
 # Cloudflare Temp Email API
@@ -53,6 +54,14 @@ def _load_dotenv(path: str = ".env") -> None:
 
 _load_dotenv()
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return int(str(raw).strip() or str(default))
+    except Exception:
+        return int(default)
+
 MAIL_DOMAIN = os.getenv("MAIL_DOMAIN", "")
 MAIL_WORKER_BASE = os.getenv("MAIL_WORKER_BASE", "").rstrip("/")
 MAIL_ADMIN_PASSWORD = os.getenv("MAIL_ADMIN_PASSWORD", "")
@@ -76,6 +85,17 @@ HOTMAIL007_MAIL_TYPE = os.getenv(
     "HOTMAIL007_MAIL_TYPE", "outlook Trusted Graph"
 ).strip()
 HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower()
+OUTLOOK_API_URL = os.getenv("OUTLOOK_API_URL", "").strip().rstrip("/")
+OUTLOOK_API_CLIENT_ID = os.getenv("OUTLOOK_API_CLIENT_ID", "").strip()
+OUTLOOK_API_REFRESH_TOKEN = os.getenv("OUTLOOK_API_REFRESH_TOKEN", "").strip()
+OUTLOOK_API_ACCOUNTS_FILE = os.getenv(
+    "OUTLOOK_API_ACCOUNTS_FILE", "outlook_accounts.txt"
+).strip()
+OUTLOOK_API_NUM = max(1, min(2, _env_int("OUTLOOK_API_NUM", 1)))
+OUTLOOK_API_BOX_TYPE = 2 if _env_int("OUTLOOK_API_BOX_TYPE", 1) == 2 else 1
+OUTLOOK_API_TIMEOUT = max(5, _env_int("OUTLOOK_API_TIMEOUT", 15))
+OUTLOOK_API_POLL_INTERVAL = max(1, _env_int("OUTLOOK_API_POLL_INTERVAL", 3))
+OUTLOOK_API_POLL_TIMEOUT = max(20, _env_int("OUTLOOK_API_POLL_TIMEOUT", 120))
 
 ACCOUNTS_FILE = os.getenv("ACCOUNTS_FILE", "accounts.txt").strip()
 
@@ -185,7 +205,73 @@ class EmailQueue:
             return len(self._emails)
 
 
+class OutlookApiCredentialQueue:
+    """线程安全的 Outlook 凭据队列（基于状态池，不破坏源文件）"""
+
+    def __init__(
+        self,
+        filepath: str,
+        fallback_client_id: str = "",
+        fallback_refresh_token: str = "",
+    ):
+        self._fallback_client_id = str(fallback_client_id or "").strip()
+        self._fallback_refresh_token = str(fallback_refresh_token or "").strip()
+        self._store = TaobaoMailboxPool(filepath)
+        self._store.sync_from_source()
+
+    def pop(self) -> Optional[Dict[str, str]]:
+        item = self._store.acquire_next_new()
+        if not item:
+            return None
+
+        # 兼容：若池内条目仅包含邮箱，允许用全局兜底。
+        if not str(item.get("client_id") or "").strip() and self._fallback_client_id:
+            item["client_id"] = self._fallback_client_id
+        if not str(item.get("refresh_token") or "").strip() and self._fallback_refresh_token:
+            item["refresh_token"] = self._fallback_refresh_token
+
+        if not str(item.get("client_id") or "").strip() or not str(
+            item.get("refresh_token") or ""
+        ).strip():
+            email = str(item.get("email") or "").strip()
+            self._store.mark_failed(email, "missing_client_or_refresh_token")
+            return None
+        return item
+
+    def mark_success(self, email: str) -> None:
+        self._store.mark_success(email)
+
+    def mark_failed(self, email: str, reason: str = "") -> None:
+        self._store.mark_failed(email, reason)
+
+    def requeue(self, emails: List[str]) -> Dict[str, int]:
+        return self._store.requeue(emails)
+
+    def __len__(self) -> int:
+        snapshot = self._store.snapshot()
+        summary = snapshot.get("summary") if isinstance(snapshot, dict) else {}
+        return int((summary or {}).get("unused") or 0)
+
+
 _email_queue: Optional[EmailQueue] = None
+_outlook_api_queue: Optional[OutlookApiCredentialQueue] = None
+
+_thread_mail_ctx = threading.local()
+
+
+def _set_current_outlook_email(email: str) -> None:
+    setattr(_thread_mail_ctx, "outlook_email", str(email or "").strip().lower())
+
+
+def _get_current_outlook_email() -> str:
+    return str(getattr(_thread_mail_ctx, "outlook_email", "") or "").strip().lower()
+
+
+def _clear_current_outlook_email() -> None:
+    if hasattr(_thread_mail_ctx, "outlook_email"):
+        delattr(_thread_mail_ctx, "outlook_email")
+
+_outlook_api_credentials: Dict[str, dict] = {}
 
 _luckmail_client = None
 _luckmail_token_by_email: Dict[str, str] = {}
@@ -269,11 +355,16 @@ def _build_luckmail_purchase_plan(stock_map: Dict[str, int]) -> List[tuple]:
             else:
                 type_candidates = stocked_types
 
+    if stock_map:
+        supported_types = {k for k in stock_map.keys() if k}
+        if supported_types:
+            filtered_types = [
+                t for t in type_candidates if (t is None or t in supported_types)
+            ]
+            if filtered_types:
+                type_candidates = filtered_types
+
     if LUCKMAIL_AUTO_SWITCH_EMAIL_TYPE:
-        non_none_types = {v for v in type_candidates if v}
-        # 微软通用类型在实测中经常比固定 ms_imap/ms_graph 更容易命中可用库存。
-        if "microsoft" not in non_none_types:
-            type_candidates.append("microsoft")
         # 兜底让 LuckMail 自行分配类型/后缀，避免用户手工限定过窄。
         if None not in type_candidates:
             type_candidates.append(None)
@@ -340,7 +431,7 @@ GMAIL_BASE = os.getenv("GMAIL_BASE", "").strip()
 
 
 def get_email_and_token(proxies: Any = None) -> tuple:
-    """根据 EMAIL_MODE 获取邮箱: file=从accounts.txt读取, cf=自有域名随机生成, hotmail007=API拉取微软邮箱, gmail=Gmail别名, luckmail=LuckMail购买邮箱"""
+    """根据 EMAIL_MODE 获取邮箱: file=从accounts.txt读取, cf=自有域名随机生成, hotmail007=API拉取微软邮箱, outlook_api=凭据文件+GetLastEmails接码, gmail=Gmail别名, luckmail=LuckMail购买邮箱"""
     if EMAIL_MODE == "luckmail":
         try:
             client = _get_luckmail_client()
@@ -365,6 +456,7 @@ def get_email_and_token(proxies: Any = None) -> tuple:
 
             configured_attempts = max(1, int(LUCKMAIL_PURCHASE_MAX_ATTEMPTS or 1))
             max_attempts = max(configured_attempts, len(purchase_plan))
+            unsupported_types: set[str] = set()
             if max_attempts > configured_attempts:
                 print(
                     f"[*] LuckMail 尝试次数提升为 {max_attempts}，以覆盖全部候选组合"
@@ -372,6 +464,14 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             for purchase_attempt in range(1, max_attempts + 1):
                 email_type, domain = purchase_plan[(purchase_attempt - 1) % len(purchase_plan)]
                 selector = _format_luckmail_selector(email_type, domain)
+
+                if email_type and email_type in unsupported_types:
+                    if purchase_attempt < max_attempts:
+                        continue
+                    print(
+                        "[Error] LuckMail 候选组合均不可用（无库存或不支持邮箱类型）"
+                    )
+                    return "", ""
 
                 try:
                     result = client.user.purchase_emails(
@@ -382,12 +482,45 @@ def get_email_and_token(proxies: Any = None) -> tuple:
                     )
                 except Exception as purchase_err:
                     err_code = getattr(purchase_err, "code", None)
+                    err_text = str(purchase_err or "")
+                    if err_code is None:
+                        m = re.search(r"API Error \[(\d+)\]", err_text)
+                        if m:
+                            try:
+                                err_code = int(m.group(1))
+                            except Exception:
+                                err_code = None
+
+                    unsupported_type = (
+                        "不支持邮箱类型" in err_text
+                        or "unsupported email type" in err_text.lower()
+                    )
+                    if unsupported_type and email_type:
+                        unsupported_types.add(email_type)
+                        print(
+                            f"[Warn] LuckMail 项目不支持邮箱类型 {email_type}，已从后续候选中移除"
+                        )
+                        if purchase_attempt < max_attempts:
+                            continue
+                        print("[Error] LuckMail 候选类型均不受当前项目支持")
+                        return "", ""
+
+                    if err_code == 429 or "过于频繁" in err_text or "429" in err_text:
+                        backoff = min(12.0, 1.5 + purchase_attempt * 0.8)
+                        print(
+                            f"[Warn] LuckMail 请求频率受限(429)，退避 {backoff:.1f}s 后重试..."
+                        )
+                        time.sleep(backoff)
+                        if purchase_attempt < max_attempts:
+                            continue
+                        return "", ""
+
                     if err_code == 2003:
                         print(
                             f"[Warn] LuckMail 无库存 ({selector})，尝试下一个组合..."
                         )
                         if purchase_attempt < max_attempts:
-                            time.sleep(0.4)
+                            time.sleep(0.8)
                             continue
                         print("[Error] LuckMail 候选组合已全部尝试，均返回无库存(2003)")
                         print(
@@ -500,6 +633,39 @@ def get_email_and_token(proxies: Any = None) -> tuple:
         )
         _hotmail007_credentials[email]["known_ids"] = known_ids
         return email, email
+    if EMAIL_MODE == "outlook_api":
+        _clear_current_outlook_email()
+        if _outlook_api_queue is None:
+            print("[Error] Outlook API 凭据队列未初始化")
+            return "", ""
+
+        item = _outlook_api_queue.pop()
+        if not item:
+            print("[Error] Outlook API 凭据队列已耗尽")
+            return "", ""
+
+        email = str(item.get("email") or "").strip()
+        client_id = str(item.get("client_id") or "").strip()
+        refresh_token = str(item.get("refresh_token") or "").strip()
+        if not email or not client_id or not refresh_token:
+            print(f"[Error] Outlook API 凭据不完整: {item}")
+            return "", ""
+
+        _outlook_api_credentials[email] = {
+            "client_id": client_id,
+            "refresh_token": refresh_token,
+        }
+        _set_current_outlook_email(email)
+        if OUTLOOK_API_URL:
+            print(f"[*] Outlook API 预获取已有邮件ID...")
+            known_ids = _outlook_api_get_known_ids(
+                email, client_id, refresh_token, proxies
+            )
+        else:
+            print(f"[*] Outlook 直连模式预获取已有邮件ID...")
+            known_ids = _outlook_get_known_ids(email, client_id, refresh_token, proxies)
+        _outlook_api_credentials[email]["known_ids"] = known_ids
+        return email, email
     prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
     email = f"{prefix}@{MAIL_DOMAIN}"
     return email, email
@@ -542,7 +708,7 @@ def _extract_otp_code(content: str) -> str:
 def get_oai_code(
     token: str, email: str, proxies: Any = None, seen_ids: set = None
 ) -> str:
-    """根据 EMAIL_MODE 获取 OpenAI 验证码: cf=Cloudflare Worker, hotmail007=Outlook Graph/IMAP, gmail=手动输入, luckmail=Token邮件轮询"""
+    """根据 EMAIL_MODE 获取 OpenAI 验证码: cf=Cloudflare Worker, hotmail007=Outlook Graph/IMAP, outlook_api=GetLastEmails 接码, gmail=手动输入, luckmail=Token邮件轮询"""
     if EMAIL_MODE == "luckmail":
         try:
             client = _get_luckmail_client()
@@ -646,6 +812,31 @@ def get_oai_code(
             proxies=proxies,
             timeout=120,
         )
+    if EMAIL_MODE == "outlook_api":
+        creds = _outlook_api_credentials.get(email, {})
+        if not creds:
+            print(f"[Error] 未找到 {email} 的 Outlook API 凭据")
+            return ""
+        client_id = str(creds.get("client_id") or "").strip()
+        refresh_token = str(creds.get("refresh_token") or "").strip()
+        known_ids = set(creds.get("known_ids") or set())
+        if OUTLOOK_API_URL:
+            return _outlook_api_fetch_otp(
+                email,
+                client_id,
+                refresh_token,
+                known_ids=known_ids,
+                proxies=proxies,
+                timeout=OUTLOOK_API_POLL_TIMEOUT,
+            )
+        return _outlook_fetch_otp(
+            email,
+            client_id,
+            refresh_token,
+            known_ids=known_ids,
+            proxies=proxies,
+            timeout=OUTLOOK_API_POLL_TIMEOUT,
+        )
     headers = {
         "x-admin-auth": MAIL_ADMIN_PASSWORD,
         "Content-Type": "application/json",
@@ -693,7 +884,7 @@ def get_oai_code(
 
 
 def delete_temp_email(email: str, proxies: Any = None) -> None:
-    """注册成功后清理邮箱: hotmail007模式仅清理本地凭据, cf模式删除Worker邮件"""
+    """注册成功后清理邮箱: hotmail007/outlook_api 模式仅清理本地凭据, cf模式删除Worker邮件"""
     if EMAIL_MODE == "luckmail":
         _luckmail_token_by_email.pop(email, None)
         print(f"[*] LuckMail 邮箱 {email} 本地 token 已清理")
@@ -701,6 +892,10 @@ def delete_temp_email(email: str, proxies: Any = None) -> None:
     if EMAIL_MODE == "hotmail007":
         _hotmail007_credentials.pop(email, None)
         print(f"[*] Hotmail007 邮箱 {email} 本地凭据已清理")
+        return
+    if EMAIL_MODE == "outlook_api":
+        _outlook_api_credentials.pop(email, None)
+        print(f"[*] Outlook API 邮箱 {email} 本地凭据已清理")
         return
     headers = {
         "x-admin-auth": MAIL_ADMIN_PASSWORD,
@@ -738,6 +933,169 @@ def delete_temp_email(email: str, proxies: Any = None) -> None:
 # ==========================================
 
 _hotmail007_credentials: Dict[str, dict] = {}
+
+
+def _outlook_api_get_last_emails(
+    email: str,
+    client_id: str,
+    refresh_token: str,
+    proxies: Any = None,
+    *,
+    num: Optional[int] = None,
+    box_type: Optional[int] = None,
+) -> tuple:
+    if not OUTLOOK_API_URL:
+        return [], "OUTLOOK_API_URL 未配置"
+
+    req_num = OUTLOOK_API_NUM if num is None else int(num)
+    req_num = max(1, min(2, req_num))
+    req_box_type = OUTLOOK_API_BOX_TYPE if box_type is None else int(box_type)
+    req_box_type = 2 if req_box_type == 2 else 1
+
+    params = {
+        "email": str(email or "").strip(),
+        "clientId": str(client_id or "").strip(),
+        "refreshToken": str(refresh_token or "").strip(),
+        "num": req_num,
+        "boxType": req_box_type,
+    }
+    if not params["email"] or not params["clientId"] or not params["refreshToken"]:
+        return [], "缺少 email/clientId/refreshToken"
+
+    try:
+        resp = requests.get(
+            f"{OUTLOOK_API_URL}/api/GetLastEmails",
+            params=params,
+            proxies=proxies,
+            verify=_ssl_verify(),
+            timeout=OUTLOOK_API_TIMEOUT,
+            impersonate="safari",
+        )
+    except Exception as e:
+        return [], f"请求异常: {str(e)[:200]}"
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return [], f"接口返回非 JSON: HTTP {resp.status_code}"
+
+    if resp.status_code >= 400:
+        return [], f"HTTP {resp.status_code}: {str(payload)[:200]}"
+
+    code = int(payload.get("code", 0) or 0) if isinstance(payload, dict) else 0
+    if code != 200:
+        message = ""
+        if isinstance(payload, dict):
+            message = str(payload.get("message") or "")
+        return [], f"接口错误 code={code} message={message}"
+
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    if not isinstance(data, list):
+        return [], "响应 data 不是列表"
+
+    mails = [item for item in data if isinstance(item, dict)]
+    return mails, ""
+
+
+def _outlook_api_mail_digest(mail: Dict[str, Any]) -> str:
+    body = str(mail.get("Body") or "")
+    # Body 可能很大，摘要时截断可降低内存与日志压力。
+    raw = "|".join(
+        [
+            str(mail.get("Date") or ""),
+            str(mail.get("From") or ""),
+            str(mail.get("To") or ""),
+            str(mail.get("Subject") or ""),
+            body[:2000],
+        ]
+    )
+    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _outlook_api_get_known_ids(
+    email: str,
+    client_id: str,
+    refresh_token: str,
+    proxies: Any = None,
+) -> set:
+    mails, err = _outlook_api_get_last_emails(
+        email,
+        client_id,
+        refresh_token,
+        proxies=proxies,
+        num=OUTLOOK_API_NUM,
+        box_type=OUTLOOK_API_BOX_TYPE,
+    )
+    if err:
+        print(f"[Warn] Outlook API 预取历史邮件失败: {err}")
+        return set()
+    return {_outlook_api_mail_digest(mail) for mail in mails}
+
+
+def _outlook_api_fetch_otp(
+    email: str,
+    client_id: str,
+    refresh_token: str,
+    known_ids: set,
+    proxies: Any = None,
+    timeout: int = 120,
+) -> str:
+    seen_ids = set(known_ids or set())
+    timeout_sec = max(20, int(timeout or OUTLOOK_API_POLL_TIMEOUT))
+    poll_interval = max(1, int(OUTLOOK_API_POLL_INTERVAL or 3))
+    start = time.time()
+    poll_count = 0
+
+    while time.time() - start < timeout_sec:
+        poll_count += 1
+        mails, err = _outlook_api_get_last_emails(
+            email,
+            client_id,
+            refresh_token,
+            proxies=proxies,
+            num=OUTLOOK_API_NUM,
+            box_type=OUTLOOK_API_BOX_TYPE,
+        )
+
+        if err:
+            if poll_count <= 3 or poll_count % 10 == 0:
+                print(f"[Warn] Outlook API 拉信异常: {err}")
+            time.sleep(poll_interval)
+            continue
+
+        if mails and (poll_count <= 3 or poll_count % 10 == 0):
+            latest = mails[0]
+            latest_from = str(latest.get("From") or "")[:80]
+            latest_subject = str(latest.get("Subject") or "")[:80]
+            print(
+                f"[*] Outlook API 轮询#{poll_count}: mails={len(mails)}, latest_from={latest_from}, latest_subject={latest_subject}"
+            )
+        elif (not mails) and poll_count % 10 == 0:
+            print(f"[*] Outlook API 轮询#{poll_count}: 暂无邮件")
+
+        for mail in mails:
+            mid = _outlook_api_mail_digest(mail)
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+
+            content = " ".join(
+                [
+                    str(mail.get("Subject") or ""),
+                    str(mail.get("From") or ""),
+                    str(mail.get("To") or ""),
+                    str(mail.get("Body") or ""),
+                ]
+            )
+            code = _extract_otp_code(content)
+            if code:
+                print(f"[*] Outlook API 抓到验证码: {code}")
+                return code
+
+        time.sleep(poll_interval)
+
+    print("[Error] Outlook API 等待验证码超时")
+    return ""
 
 
 def _hotmail007_api_get(path: str, proxies: Any = None, **params) -> dict:
@@ -1613,6 +1971,7 @@ def run(proxy: Optional[str]) -> tuple:
             print(f"[Error] 网络连接检查失败: {e}")
             return None, None
 
+    _clear_current_outlook_email()
     email, dev_token = get_email_and_token(proxies)
     if not email or not dev_token:
         return None, None
@@ -2515,9 +2874,35 @@ def _worker(
     local_success = 0
     local_round = 0
 
+    def _handle_outlook_round_result(status: str, reason: str = "") -> None:
+        if EMAIL_MODE != "outlook_api" or _outlook_api_queue is None:
+            return
+        current_email = _get_current_outlook_email()
+        if not current_email:
+            return
+        try:
+            if status == "success":
+                _outlook_api_queue.mark_success(current_email)
+            elif status == "requeue":
+                _outlook_api_queue.requeue([current_email])
+            elif status == "failed":
+                _outlook_api_queue.mark_failed(current_email, reason or "register_failed")
+        except Exception as mark_err:
+            print(f"[Warn] 更新淘宝邮箱池状态失败({current_email}): {mark_err}")
+        finally:
+            _outlook_api_credentials.pop(current_email, None)
+            _clear_current_outlook_email()
+
     while not stop_event.is_set():
         if EMAIL_MODE == "file" and _email_queue is not None and len(_email_queue) == 0:
             print(f"[T{worker_id}] 邮箱队列已用完，停止线程")
+            break
+        if (
+            EMAIL_MODE == "outlook_api"
+            and _outlook_api_queue is not None
+            and len(_outlook_api_queue) == 0
+        ):
+            print(f"[T{worker_id}] Outlook API 凭据队列已用完，停止线程")
             break
 
         if remaining is not None:
@@ -2539,6 +2924,7 @@ def _worker(
 
             if token_json == "retry_403":
                 print(f"{tag} 检测到 403，等待10秒后重试...")
+                _handle_outlook_round_result("requeue", "retry_403")
                 if remaining is not None:
                     with _success_counter_lock:
                         remaining[0] += 1
@@ -2547,6 +2933,7 @@ def _worker(
 
             if token_json == "retry_rebuy":
                 print(f"{tag} LuckMail 超时触发重买，立即重试...")
+                _handle_outlook_round_result("requeue", "retry_rebuy")
                 if remaining is not None:
                     with _success_counter_lock:
                         remaining[0] += 1
@@ -2555,12 +2942,14 @@ def _worker(
 
             if token_json:
                 _save_result(token_json, password, proxy_str)
+                _handle_outlook_round_result("success")
                 local_success += 1
                 with _success_counter_lock:
                     _success_counter += 1
                 print(f"{tag} 注册成功! (本线程累计: {local_success})")
             else:
                 print(f"{tag} 本次注册失败")
+                _handle_outlook_round_result("failed", "register_failed")
                 if (
                     EMAIL_MODE == "file"
                     and _email_queue is not None
@@ -2568,9 +2957,17 @@ def _worker(
                 ):
                     print(f"{tag} 邮箱队列已用完，停止线程")
                     break
+                if (
+                    EMAIL_MODE == "outlook_api"
+                    and _outlook_api_queue is not None
+                    and len(_outlook_api_queue) == 0
+                ):
+                    print(f"{tag} Outlook API 凭据队列已用完，停止线程")
+                    break
 
         except Exception as e:
             print(f"{tag} [Error] 未捕获异常: {e}")
+            _handle_outlook_round_result("failed", f"worker_exception:{str(e)[:120]}")
 
         if count_target == 1 and remaining is None:
             break
@@ -2597,7 +2994,16 @@ def main() -> None:
         HOTMAIL007_API_KEY, \
         HOTMAIL007_MAIL_TYPE, \
         HOTMAIL007_MAIL_MODE, \
-        _email_queue
+        OUTLOOK_API_URL, \
+        OUTLOOK_API_CLIENT_ID, \
+        OUTLOOK_API_REFRESH_TOKEN, \
+        OUTLOOK_API_ACCOUNTS_FILE, \
+        OUTLOOK_API_NUM, \
+        OUTLOOK_API_BOX_TYPE, \
+        OUTLOOK_API_POLL_INTERVAL, \
+        OUTLOOK_API_POLL_TIMEOUT, \
+        _email_queue, \
+        _outlook_api_queue
 
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本")
     parser.add_argument(
@@ -2631,8 +3037,8 @@ def main() -> None:
     parser.add_argument(
         "--email-mode",
         default=None,
-        choices=["cf", "hotmail007", "file", "gmail", "luckmail"],
-        help="邮箱模式: file=从accounts.txt读取, cf=Cloudflare自有域名, hotmail007=API拉取微软邮箱, gmail=Gmail别名+手动输入验证码, luckmail=LuckMail购买邮箱自动接码 (默认读.env EMAIL_MODE)",
+        choices=["cf", "hotmail007", "outlook_api", "file", "gmail", "luckmail"],
+        help="邮箱模式: file=从accounts.txt读取, cf=Cloudflare自有域名, hotmail007=API拉取微软邮箱, outlook_api=凭据文件+GetLastEmails接码, gmail=Gmail别名+手动输入验证码, luckmail=LuckMail购买邮箱自动接码 (默认读.env EMAIL_MODE)",
     )
     parser.add_argument(
         "--accounts-file",
@@ -2653,12 +3059,59 @@ def main() -> None:
         choices=["graph", "imap"],
         help="Hotmail007 收信模式: graph=Microsoft Graph API, imap=IMAP协议 (默认graph)",
     )
+    parser.add_argument(
+        "--outlook-api-url",
+        default=None,
+        help="Outlook API 基础地址，例如 https://example.com",
+    )
+    parser.add_argument(
+        "--outlook-api-accounts-file",
+        default=None,
+        help="Outlook API 凭据文件路径，支持 email----clientId----refreshToken",
+    )
+    parser.add_argument(
+        "--outlook-api-client-id",
+        default=None,
+        help="Outlook API 全局 clientId（当凭据文件每行仅有邮箱时可用）",
+    )
+    parser.add_argument(
+        "--outlook-api-refresh-token",
+        default=None,
+        help="Outlook API 全局 refreshToken（当凭据文件每行仅有邮箱时可用）",
+    )
+    parser.add_argument(
+        "--outlook-api-num",
+        type=int,
+        default=None,
+        help="Outlook API 每次拉取邮件数量 (默认1, 最大2)",
+    )
+    parser.add_argument(
+        "--outlook-api-box-type",
+        type=int,
+        default=None,
+        choices=[1, 2],
+        help="Outlook API 邮箱类型: 1=收件箱 2=垃圾箱",
+    )
+    parser.add_argument(
+        "--outlook-api-poll-interval",
+        type=int,
+        default=None,
+        help="Outlook API 轮询间隔秒数",
+    )
+    parser.add_argument(
+        "--outlook-api-poll-timeout",
+        type=int,
+        default=None,
+        help="Outlook API 验证码等待超时秒数",
+    )
     args = parser.parse_args()
 
     if args.email_mode:
         EMAIL_MODE = args.email_mode.strip().lower()
     if args.accounts_file:
         ACCOUNTS_FILE = args.accounts_file.strip()
+        if EMAIL_MODE == "outlook_api":
+            OUTLOOK_API_ACCOUNTS_FILE = ACCOUNTS_FILE
     if EMAIL_MODE == "file":
         _email_queue = EmailQueue(ACCOUNTS_FILE)
         if len(_email_queue) == 0:
@@ -2673,6 +3126,41 @@ def main() -> None:
         HOTMAIL007_MAIL_TYPE = args.hotmail007_type.strip()
     if args.hotmail007_mail_mode:
         HOTMAIL007_MAIL_MODE = args.hotmail007_mail_mode.strip().lower()
+    if args.outlook_api_url:
+        OUTLOOK_API_URL = args.outlook_api_url.strip().rstrip("/")
+    if args.outlook_api_accounts_file:
+        OUTLOOK_API_ACCOUNTS_FILE = args.outlook_api_accounts_file.strip()
+    if args.outlook_api_client_id:
+        OUTLOOK_API_CLIENT_ID = args.outlook_api_client_id.strip()
+    if args.outlook_api_refresh_token:
+        OUTLOOK_API_REFRESH_TOKEN = args.outlook_api_refresh_token.strip()
+    if args.outlook_api_num is not None:
+        OUTLOOK_API_NUM = max(1, min(2, int(args.outlook_api_num)))
+    if args.outlook_api_box_type is not None:
+        OUTLOOK_API_BOX_TYPE = 2 if int(args.outlook_api_box_type) == 2 else 1
+    if args.outlook_api_poll_interval is not None:
+        OUTLOOK_API_POLL_INTERVAL = max(1, int(args.outlook_api_poll_interval))
+    if args.outlook_api_poll_timeout is not None:
+        OUTLOOK_API_POLL_TIMEOUT = max(20, int(args.outlook_api_poll_timeout))
+
+    if EMAIL_MODE == "outlook_api":
+        accounts_path = OUTLOOK_API_ACCOUNTS_FILE.strip()
+        if not accounts_path:
+            print("[Error] OUTLOOK_API_ACCOUNTS_FILE 未配置")
+            return
+        _outlook_api_queue = OutlookApiCredentialQueue(
+            accounts_path,
+            fallback_client_id=OUTLOOK_API_CLIENT_ID,
+            fallback_refresh_token=OUTLOOK_API_REFRESH_TOKEN,
+        )
+        if len(_outlook_api_queue) == 0:
+            print(
+                f"[Error] Outlook API 凭据文件 {accounts_path} 为空或格式不正确，请填写 email----clientId----refreshToken"
+            )
+            return
+        print(
+            f"[*] 从 {accounts_path} 加载了 {len(_outlook_api_queue)} 组 Outlook API 凭据"
+        )
 
     proxy_file_path = args.proxy_file or PROXY_FILE
     proxy_list = _load_proxies(proxy_file_path)
@@ -2730,6 +3218,15 @@ def main() -> None:
         mode_label = "Cloudflare Worker (自有域名)"
     elif EMAIL_MODE == "gmail":
         mode_label = f"Gmail 别名 + 手动输入验证码 ({GMAIL_BASE}@gmail.com)"
+    elif EMAIL_MODE == "outlook_api":
+        queue_size = len(_outlook_api_queue) if _outlook_api_queue is not None else 0
+        if OUTLOOK_API_URL:
+            mode_label = (
+                "Outlook API 接码 "
+                f"({OUTLOOK_API_URL}, num={OUTLOOK_API_NUM}, boxType={OUTLOOK_API_BOX_TYPE}, 剩余 {queue_size} 组)"
+            )
+        else:
+            mode_label = f"Outlook 直连接码(Graph/IMAP, 剩余 {queue_size} 组)"
     elif EMAIL_MODE == "luckmail":
         mode_label = (
             "LuckMail 购买邮箱自动接码 "
@@ -2770,12 +3267,24 @@ def main() -> None:
             print(f"  当前库存: {stk}")
         else:
             print(f"  当前库存: 查询失败 ({stk_err})")
+    if EMAIL_MODE == "outlook_api":
+        if OUTLOOK_API_URL:
+            print(f"  API 地址: {OUTLOOK_API_URL}")
+            print(f"  拉取数量(num): {OUTLOOK_API_NUM}")
+            print(f"  邮箱类型(boxType): {OUTLOOK_API_BOX_TYPE}")
+        else:
+            print(f"  接码模式: 直连 Microsoft {HOTMAIL007_MAIL_MODE.upper()}")
+        print(f"  轮询间隔: {OUTLOOK_API_POLL_INTERVAL}s")
+        print(f"  超时设置: {OUTLOOK_API_POLL_TIMEOUT}s")
     print("=" * 60)
     print()
 
     if EMAIL_MODE == "file" and _email_queue is not None and not batch_count:
         batch_count = len(_email_queue)
         print(f"[*] file 模式自动设置批量数量: {batch_count}")
+    if EMAIL_MODE == "outlook_api" and _outlook_api_queue is not None and not batch_count:
+        batch_count = len(_outlook_api_queue)
+        print(f"[*] outlook_api 模式自动设置批量数量: {batch_count}")
 
     if args.once and not batch_count:
         batch_count = 1

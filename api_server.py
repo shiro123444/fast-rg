@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from auto_pool_maintainer import get_candidates_count
+from taobao_pool import TaobaoMailboxPool
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", str(PROJECT_ROOT)))
@@ -209,6 +210,7 @@ def mask_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
         ("clean", "token"),
         ("luckmail", "api_key"),
         ("hotmail007", "api_key"),
+        ("outlook_api", "refresh_token"),
         ("cfmail", "admin_password"),
     ]
     for section, key in sensitive_fields:
@@ -235,6 +237,7 @@ def merge_config_with_sensitive_fields(
         ("clean", "token"),
         ("luckmail", "api_key"),
         ("hotmail007", "api_key"),
+        ("outlook_api", "refresh_token"),
         ("cfmail", "admin_password"),
     ]
     for section, key in sensitive_fields:
@@ -281,6 +284,45 @@ def merge_config_with_sensitive_fields(
         merged["cpa_pools"] = merged_pools
 
     return merged
+
+
+def _resolve_taobao_accounts_file(config: Optional[Dict[str, Any]] = None) -> Path:
+    cfg = config or load_config()
+    outlook_conf = cfg.get("outlook_api") if isinstance(cfg.get("outlook_api"), dict) else {}
+    raw_path = str((outlook_conf or {}).get("accounts_file") or "outlook_accounts.txt").strip()
+    if not raw_path:
+        raw_path = "outlook_accounts.txt"
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    return path
+
+
+def _taobao_pool(config: Optional[Dict[str, Any]] = None) -> TaobaoMailboxPool:
+    return TaobaoMailboxPool(str(_resolve_taobao_accounts_file(config=config)))
+
+
+def _coerce_email_list(payload: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    raw_list = payload.get("emails")
+    if isinstance(raw_list, list):
+        for item in raw_list:
+            email = str(item or "").strip().lower()
+            if not email or email in seen:
+                continue
+            seen.add(email)
+            out.append(email)
+
+    raw_text = str(payload.get("emails_text") or "").strip()
+    if raw_text:
+        for line in raw_text.splitlines():
+            email = str(line or "").strip().lower()
+            if not email or email in seen:
+                continue
+            seen.add(email)
+            out.append(email)
+    return out
 
 
 def is_sensitive_field_masked(value: Any) -> bool:
@@ -949,6 +991,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             config = load_config()
             self._send_json({"items": get_enabled_pools_from_config(config)})
             return
+        if path == "/api/mail/taobao-pool":
+            config = load_config()
+            pool = _taobao_pool(config=config)
+            snapshot = pool.snapshot()
+            self._send_json(snapshot)
+            return
         if path == "/api/health":
             self._send_json({"ok": True, "time": datetime.now().isoformat()})
             return
@@ -987,6 +1035,60 @@ class ApiHandler(BaseHTTPRequestHandler):
                         )
                     ),
                 )
+            )
+            return
+        if path == "/api/mail/taobao-pool/import":
+            payload = self._read_json_body()
+            bulk_text = str(payload.get("text") or "")
+            config = load_config()
+            pool = _taobao_pool(config=config)
+            result = pool.import_bulk_text(bulk_text)
+            snapshot = pool.snapshot()
+            self._send_json({"ok": True, "result": result, "snapshot": snapshot})
+            return
+        if path == "/api/mail/taobao-pool/requeue":
+            payload = self._read_json_body()
+            config = load_config()
+            pool = _taobao_pool(config=config)
+            emails = _coerce_email_list(payload)
+            if not emails:
+                snapshot = pool.snapshot()
+                emails = [
+                    str(item.get("email") or "").strip().lower()
+                    for item in (snapshot.get("failed") or [])
+                    if str(item.get("email") or "").strip()
+                ]
+            result = pool.requeue(emails)
+            snapshot = pool.snapshot()
+            self._send_json(
+                {
+                    "ok": True,
+                    "emails": emails,
+                    "result": result,
+                    "snapshot": snapshot,
+                }
+            )
+            return
+        if path == "/api/mail/taobao-pool/abandon":
+            payload = self._read_json_body()
+            config = load_config()
+            pool = _taobao_pool(config=config)
+            emails = _coerce_email_list(payload)
+            if not emails:
+                self._send_json(
+                    {"ok": False, "message": "emails 不能为空"},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            result = pool.abandon(emails)
+            snapshot = pool.snapshot()
+            self._send_json(
+                {
+                    "ok": True,
+                    "emails": emails,
+                    "result": result,
+                    "snapshot": snapshot,
+                }
             )
             return
         self._send_json({"error": "Not Found"}, status=HTTPStatus.NOT_FOUND)

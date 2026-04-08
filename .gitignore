@@ -7,6 +7,9 @@ config.local.json
 config.json
 
 accounts.txt
+outlook_accounts.txt
+outlook_accounts.txt.state.json
+outlook_accounts.txt.state.json.lock
 token_*.json
 logs/
 .maintainer_run_state.json

@@ -51,6 +51,17 @@ export const defaultBackendConfig: BackendConfig = {
     mail_type: "outlook Trusted Graph",
     mail_mode: "imap",
   },
+  outlook_api: {
+    api_url: "",
+    accounts_file: "outlook_accounts.txt",
+    client_id: "",
+    refresh_token: "",
+    num: 1,
+    box_type: 1,
+    timeout_seconds: 15,
+    poll_interval_seconds: 3,
+    otp_timeout_seconds: 120,
+  },
   file_mail: {
     accounts_file: "accounts.txt",
   },
@@ -152,6 +163,7 @@ export function normalizeBackendConfig(
   const luckmail = (source.luckmail ?? {}) as Partial<BackendConfig["luckmail"]>;
   const gmail = (source.gmail ?? {}) as Partial<BackendConfig["gmail"]>;
   const hotmail007 = (source.hotmail007 ?? {}) as Partial<BackendConfig["hotmail007"]>;
+  const outlookApi = (source.outlook_api ?? {}) as Partial<BackendConfig["outlook_api"]>;
   const fileMail = (source.file_mail ?? {}) as Partial<BackendConfig["file_mail"]>;
   const maintainer = (source.maintainer ?? {}) as Partial<BackendConfig["maintainer"]>;
   const run = (source.run ?? {}) as Partial<BackendConfig["run"]>;
@@ -209,6 +221,23 @@ export function normalizeBackendConfig(
       api_key: toString(hotmail007.api_key, defaultBackendConfig.hotmail007.api_key),
       mail_type: toString(hotmail007.mail_type, defaultBackendConfig.hotmail007.mail_type),
       mail_mode: toString(hotmail007.mail_mode, defaultBackendConfig.hotmail007.mail_mode),
+    },
+    outlook_api: {
+      api_url: toString(outlookApi.api_url, defaultBackendConfig.outlook_api.api_url),
+      accounts_file: toString(outlookApi.accounts_file, defaultBackendConfig.outlook_api.accounts_file),
+      client_id: toString(outlookApi.client_id, defaultBackendConfig.outlook_api.client_id),
+      refresh_token: toString(outlookApi.refresh_token, defaultBackendConfig.outlook_api.refresh_token),
+      num: toNumber(outlookApi.num, defaultBackendConfig.outlook_api.num),
+      box_type: toNumber(outlookApi.box_type, defaultBackendConfig.outlook_api.box_type),
+      timeout_seconds: toNumber(outlookApi.timeout_seconds, defaultBackendConfig.outlook_api.timeout_seconds),
+      poll_interval_seconds: toNumber(
+        outlookApi.poll_interval_seconds,
+        defaultBackendConfig.outlook_api.poll_interval_seconds,
+      ),
+      otp_timeout_seconds: toNumber(
+        outlookApi.otp_timeout_seconds,
+        defaultBackendConfig.outlook_api.otp_timeout_seconds,
+      ),
     },
     file_mail: {
       accounts_file: toString(fileMail.accounts_file, defaultBackendConfig.file_mail.accounts_file),
@@ -367,6 +396,7 @@ export function configToSections(config: BackendConfig): ConfigSection[] {
             { label: "luckmail", value: "luckmail" },
             { label: "gmail", value: "gmail" },
             { label: "hotmail007", value: "hotmail007" },
+            { label: "taobao(outlook_api)", value: "outlook_api" },
             { label: "file", value: "file" },
             { label: "cf", value: "cf" },
           ],
@@ -415,6 +445,38 @@ export function configToSections(config: BackendConfig): ConfigSection[] {
             { label: "imap", value: "imap" },
             { label: "graph", value: "graph" },
           ],
+        },
+      ],
+    },
+    {
+      key: "outlook_api",
+      label: "淘宝邮箱配置",
+      columns: 2,
+      fields: [
+        { key: "api_url", label: "API地址(可空)", type: "text", value: config.outlook_api.api_url },
+        { key: "accounts_file", label: "凭据文件", type: "text", value: config.outlook_api.accounts_file },
+        { key: "client_id", label: "全局 Client ID", type: "text", value: config.outlook_api.client_id },
+        {
+          key: "refresh_token",
+          label: "全局 Refresh Token",
+          type: "password",
+          value: config.outlook_api.refresh_token,
+          sensitive: true,
+        },
+        { key: "num", label: "每次拉取数量", type: "number", value: config.outlook_api.num },
+        { key: "box_type", label: "箱类型(1收件箱/2垃圾箱)", type: "number", value: config.outlook_api.box_type },
+        { key: "timeout_seconds", label: "接口超时(秒)", type: "number", value: config.outlook_api.timeout_seconds },
+        {
+          key: "poll_interval_seconds",
+          label: "轮询间隔(秒)",
+          type: "number",
+          value: config.outlook_api.poll_interval_seconds,
+        },
+        {
+          key: "otp_timeout_seconds",
+          label: "OTP超时(秒)",
+          type: "number",
+          value: config.outlook_api.otp_timeout_seconds,
         },
       ],
     },

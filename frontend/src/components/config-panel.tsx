@@ -1,6 +1,13 @@
 import { useEffect, useState } from "preact/hooks";
 import type { ConfigField, ConfigSection } from "../types/runtime";
-import { testPoolConnection } from "../services/api";
+import type { TaobaoPoolSnapshot } from "../types/api";
+import {
+  abandonTaobaoPool,
+  fetchTaobaoPoolSnapshot,
+  importTaobaoPoolText,
+  requeueTaobaoPool,
+  testPoolConnection,
+} from "../services/api";
 
 type ConfigPanelProps = {
   sections: ConfigSection[];
@@ -227,6 +234,210 @@ function CpaPoolsEditor(props: {
   );
 }
 
+function TaobaoPoolManager(props: { visible: boolean }) {
+  const { visible } = props;
+  const [snapshot, setSnapshot] = useState<TaobaoPoolSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [message, setMessage] = useState("");
+  const [selectedFailed, setSelectedFailed] = useState<Record<string, boolean>>({});
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const data = await fetchTaobaoPoolSnapshot();
+      setSnapshot(data);
+    } catch (error) {
+      setMessage(`加载淘宝邮箱池失败: ${String(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    refresh().catch(() => undefined);
+  }, [visible]);
+
+  const failedEmails = (snapshot?.failed ?? []).map((item) => item.email);
+  const selectedEmails = failedEmails.filter((email) => selectedFailed[email]);
+
+  const handleImport = async () => {
+    if (!importText.trim()) {
+      setMessage("请先粘贴淘宝邮箱文本");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await importTaobaoPoolText(importText);
+      setSnapshot(result.snapshot ?? null);
+      const added = Number(result.result?.added ?? 0);
+      const duplicates = Number(result.result?.duplicates ?? 0);
+      const invalid = Number((result.result?.invalid_lines ?? []).length);
+      setMessage(`导入完成: 新增 ${added}, 重复 ${duplicates}, 无效 ${invalid}`);
+      setImportText("");
+      setSelectedFailed({});
+    } catch (error) {
+      setMessage(`导入失败: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRequeue = async (emails: string[]) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await requeueTaobaoPool(emails);
+      setSnapshot(result.snapshot ?? null);
+      const updated = Number(result.result?.updated ?? 0);
+      setMessage(`重跑队列更新完成: ${updated}`);
+      setSelectedFailed({});
+    } catch (error) {
+      setMessage(`重跑失败: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAbandon = async () => {
+    if (!selectedEmails.length) {
+      setMessage("请先勾选失败邮箱");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await abandonTaobaoPool(selectedEmails);
+      setSnapshot(result.snapshot ?? null);
+      const updated = Number(result.result?.updated ?? 0);
+      setMessage(`已遗弃 ${updated} 个失败邮箱`);
+      setSelectedFailed({});
+    } catch (error) {
+      setMessage(`遗弃失败: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!visible) {
+    return null;
+  }
+
+  const summary = snapshot?.summary;
+
+  return (
+    <section class="config-group expanded taobao-group">
+      <div class="group-toggle">
+        <span class="group-title">
+          淘宝邮箱池
+          <span class="group-key">taobao_pool</span>
+        </span>
+      </div>
+      <div class="group-content taobao-content">
+        <div class="taobao-summary">
+          <span>未使用: {summary?.unused ?? 0}</span>
+          <span>使用成功: {summary?.used ?? 0}</span>
+          <span>失败: {summary?.failed ?? 0}</span>
+          <span>占用中: {summary?.in_use ?? 0}</span>
+        </div>
+
+        <label class="field">
+          <span class="field-label">粘贴导入 (支持 email----password----clientId----refreshToken)</span>
+          <textarea
+            value={importText}
+            placeholder="每行一条，重复自动去重"
+            onInput={(event) => setImportText((event.currentTarget as HTMLTextAreaElement).value)}
+          />
+        </label>
+
+        <div class="taobao-actions">
+          <button type="button" class="button secondary" disabled={busy} onClick={handleImport}>
+            {busy ? "处理中..." : "导入并去重"}
+          </button>
+          <button type="button" class="button tertiary" disabled={busy || loading} onClick={() => refresh()}>
+            {loading ? "刷新中..." : "刷新状态"}
+          </button>
+          <button
+            type="button"
+            class="button secondary"
+            disabled={busy || (summary?.failed ?? 0) <= 0}
+            onClick={() => handleRequeue([])}
+          >
+            全部失败重跑
+          </button>
+          <button
+            type="button"
+            class="button secondary"
+            disabled={busy || selectedEmails.length <= 0}
+            onClick={() => handleRequeue(selectedEmails)}
+          >
+            重跑选中失败
+          </button>
+          <button
+            type="button"
+            class="button warning"
+            disabled={busy || selectedEmails.length <= 0}
+            onClick={handleAbandon}
+          >
+            遗弃选中失败
+          </button>
+        </div>
+
+        <div class="taobao-lists">
+          <div class="taobao-list">
+            <div class="taobao-list-title">未使用 ({summary?.unused ?? 0})</div>
+            <div class="taobao-list-body">
+              {(snapshot?.unused ?? []).map((item) => (
+                <div class="taobao-item" key={`unused-${item.email}`}>
+                  <span>{item.email}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div class="taobao-list">
+            <div class="taobao-list-title">已使用 ({summary?.used ?? 0})</div>
+            <div class="taobao-list-body">
+              {(snapshot?.used ?? []).map((item) => (
+                <div class="taobao-item" key={`used-${item.email}`}>
+                  <span>{item.email}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div class="taobao-list">
+            <div class="taobao-list-title">失败 ({summary?.failed ?? 0})</div>
+            <div class="taobao-list-body">
+              {(snapshot?.failed ?? []).map((item) => (
+                <label class="taobao-item check-row" key={`failed-${item.email}`}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(selectedFailed[item.email])}
+                    onInput={(event) => {
+                      const checked = (event.currentTarget as HTMLInputElement).checked;
+                      setSelectedFailed((current) => ({ ...current, [item.email]: checked }));
+                    }}
+                  />
+                  <span>{item.email}</span>
+                  <small>{item.last_error || "register_failed"}</small>
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {message ? <div class="field-hint">{message}</div> : null}
+      </div>
+    </section>
+  );
+}
+
 function FieldControl(props: {
   sectionKey: string;
   field: ConfigField;
@@ -324,6 +535,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
     luckmail: true,
     gmail: false,
     hotmail007: false,
+    outlook_api: false,
     file_mail: false,
     cfmail: false,
     run: false,
@@ -339,6 +551,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
     luckmail: "mail",
     gmail: "mail",
     hotmail007: "mail",
+    outlook_api: "mail",
     file_mail: "mail",
     cfmail: "mail",
     run: "advanced",
@@ -362,6 +575,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
     luckmail: "LuckMail",
     gmail: "Gmail",
     hotmail007: "Hotmail007",
+    outlook_api: "淘宝邮箱",
     file: "邮箱文件",
     cf: "Cloudflare",
   };
@@ -373,6 +587,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
     if (section.key === "luckmail") return selectedProvider === "luckmail";
     if (section.key === "gmail") return selectedProvider === "gmail";
     if (section.key === "hotmail007") return selectedProvider === "hotmail007";
+    if (section.key === "outlook_api") return selectedProvider === "outlook_api";
     if (section.key === "file_mail") return selectedProvider === "file";
     if (section.key === "cfmail") return selectedProvider === "cf";
     return true;
@@ -419,6 +634,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
       selectedProvider === "luckmail" ||
       selectedProvider === "gmail" ||
       selectedProvider === "hotmail007" ||
+      selectedProvider === "outlook_api" ||
       selectedProvider === "file" ||
       selectedProvider === "cf"
     ) {
@@ -444,6 +660,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
       selectedProvider === "luckmail" ||
       selectedProvider === "gmail" ||
       selectedProvider === "hotmail007" ||
+      selectedProvider === "outlook_api" ||
       selectedProvider === "file" ||
       selectedProvider === "cf"
     ) {
@@ -529,6 +746,8 @@ export function ConfigPanel(props: ConfigPanelProps) {
             </section>
           );
         })}
+
+        <TaobaoPoolManager visible={String(selectedProvider) === "outlook_api"} />
 
         <div class="settings-actions">
           <button class="button primary" type="button" onClick={onStart} disabled={busy || running}>

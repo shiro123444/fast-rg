@@ -23,10 +23,31 @@
 - `luckmail`
 - `gmail`
 - `hotmail007`
+- `outlook_api`
 - `file`
 - `cf`
 
 这些模式最终都映射到 `gpt.py --email-mode ...`，确保注册流程仍然走你的原始逻辑。
+
+### Outlook API 渠道（GetLastEmails）
+
+当 `mail.provider = outlook_api` 时，程序会从凭据文件逐行消费邮箱，并通过以下接口轮询验证码：
+
+- `GET {api_url}/api/GetLastEmails`
+- 参数：`email`、`clientId`、`refreshToken`（可选 `num`、`boxType`）
+
+凭据文件默认是 `outlook_accounts.txt`，每行推荐格式：
+
+```text
+email----clientId----refreshToken
+```
+
+也兼容：
+
+- `email|clientId|refreshToken`
+- `email,clientId,refreshToken`
+- `email<TAB>clientId<TAB>refreshToken`
+- `email:password:refreshToken:clientId`（兼容 hotmail007 原始返回）
 
 ## 多 CPA 号池（已支持）
 
@@ -152,6 +173,6 @@ python api_server.py
 - `run.workers`: 补号时传给 `gpt.py` 的并发线程
 - `run.proxy` / `run.proxy_file`: 代理
 - `mail.provider`: 邮箱模式
-- `luckmail/gmail/hotmail007/file_mail/cfmail`: 对应模式参数
+- `luckmail/gmail/hotmail007/outlook_api/file_mail/cfmail`: 对应模式参数
 
 

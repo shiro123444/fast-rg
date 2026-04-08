@@ -382,6 +382,9 @@ def _provider_mode(provider: str) -> str:
         "luckmail": "luckmail",
         "gmail": "gmail",
         "hotmail007": "hotmail007",
+        "outlook_api": "outlook_api",
+        "outlookapi": "outlook_api",
+        "msapi": "outlook_api",
         "file": "file",
         "cf": "cf",
         "cfmail": "cf",
@@ -454,6 +457,27 @@ def _build_child_env(
             ("mail_mode", "HOTMAIL007_MAIL_MODE"),
         ]:
             value = str(hotmail.get(src) or "").strip()
+            if value:
+                env[dst] = value
+
+    if mode == "outlook_api":
+        outlook_api = (
+            conf.get("outlook_api", {})
+            if isinstance(conf.get("outlook_api"), dict)
+            else {}
+        )
+        for src, dst in [
+            ("api_url", "OUTLOOK_API_URL"),
+            ("accounts_file", "OUTLOOK_API_ACCOUNTS_FILE"),
+            ("client_id", "OUTLOOK_API_CLIENT_ID"),
+            ("refresh_token", "OUTLOOK_API_REFRESH_TOKEN"),
+            ("num", "OUTLOOK_API_NUM"),
+            ("box_type", "OUTLOOK_API_BOX_TYPE"),
+            ("timeout_seconds", "OUTLOOK_API_TIMEOUT"),
+            ("poll_interval_seconds", "OUTLOOK_API_POLL_INTERVAL"),
+            ("otp_timeout_seconds", "OUTLOOK_API_POLL_TIMEOUT"),
+        ]:
+            value = _env_string(outlook_api.get(src))
             if value:
                 env[dst] = value
 

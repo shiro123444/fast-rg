@@ -62,6 +62,17 @@ export type BackendConfig = {
     mail_type: string;
     mail_mode: string;
   };
+  outlook_api: {
+    api_url: string;
+    accounts_file: string;
+    client_id: string;
+    refresh_token: string;
+    num: number;
+    box_type: number;
+    timeout_seconds: number;
+    poll_interval_seconds: number;
+    otp_timeout_seconds: number;
+  };
   file_mail: {
     accounts_file: string;
   };
@@ -158,4 +169,50 @@ export type StopRuntimeResponse = {
 
 export type AuthState = {
   token: string;
+};
+
+export type TaobaoPoolItem = {
+  email: string;
+  status: string;
+  attempt_count: number;
+  success_count: number;
+  fail_count: number;
+  last_error: string;
+  updated_at: string;
+  client_id: string;
+  refresh_token_masked: string;
+};
+
+export type TaobaoPoolSnapshot = {
+  summary: {
+    unused: number;
+    in_use: number;
+    used: number;
+    failed: number;
+    abandoned: number;
+    total: number;
+  };
+  unused: TaobaoPoolItem[];
+  in_use: TaobaoPoolItem[];
+  used: TaobaoPoolItem[];
+  failed: TaobaoPoolItem[];
+  abandoned: TaobaoPoolItem[];
+  state_file: string;
+  accounts_file: string;
+};
+
+export type TaobaoPoolMutationResponse = {
+  ok: boolean;
+  message?: string;
+  result?: {
+    added?: number;
+    updated?: number;
+    duplicates?: number;
+    invalid_lines?: string[];
+    total_lines?: number;
+    total_pool?: number;
+    missing?: number;
+  };
+  emails?: string[];
+  snapshot?: TaobaoPoolSnapshot;
 };
