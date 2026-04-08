@@ -36,8 +36,11 @@
     "api_base": "https://mails.luckyous.com",
     "api_key": "YOUR_LUCKMAIL_API_KEY",
     "project_code": "openai",
-    "email_type": "ms_imap",
-    "domain": "hotmail.com"
+    "email_type": "ms_imap,ms_graph",
+    "domain": "hotmail.com,outlook.com",
+    "auto_switch_email_type": true,
+    "allow_domain_auto_fallback": false,
+    "stock_hard_block": false
   },
   "gmail": {
     "base": "your_gmail_base"
@@ -53,7 +56,9 @@
   },
   "maintainer": {
     "min_candidates": 20,
-    "loop_interval_seconds": 60
+    "loop_interval_seconds": 60,
+    "register_retry_rounds": 3,
+    "register_retry_backoff_seconds": 3
   },
   "run": {
     "workers": 2,

@@ -12,6 +12,7 @@ import hashlib
 import base64
 import threading
 import argparse
+from itertools import product
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, parse_qs, urlencode, quote
 from dataclasses import dataclass
@@ -86,6 +87,15 @@ LUCKMAIL_API_KEY = os.getenv("LUCKMAIL_API_KEY", "").strip()
 LUCKMAIL_PROJECT_CODE = os.getenv("LUCKMAIL_PROJECT_CODE", "openai").strip() or "openai"
 LUCKMAIL_EMAIL_TYPE = os.getenv("LUCKMAIL_EMAIL_TYPE", "").strip()
 LUCKMAIL_DOMAIN = os.getenv("LUCKMAIL_DOMAIN", "").strip()
+LUCKMAIL_AUTO_SWITCH_EMAIL_TYPE = os.getenv(
+    "LUCKMAIL_AUTO_SWITCH_EMAIL_TYPE", "1"
+).strip().lower() not in {"0", "false", "no"}
+LUCKMAIL_ALLOW_DOMAIN_AUTO_FALLBACK = os.getenv(
+    "LUCKMAIL_ALLOW_DOMAIN_AUTO_FALLBACK", "0"
+).strip().lower() in {"1", "true", "yes"}
+LUCKMAIL_STOCK_HARD_BLOCK = os.getenv(
+    "LUCKMAIL_STOCK_HARD_BLOCK", "0"
+).strip().lower() in {"1", "true", "yes"}
 LUCKMAIL_OTP_TIMEOUT = int(os.getenv("LUCKMAIL_OTP_TIMEOUT", "60") or "60")
 LUCKMAIL_PRECHECK_ENABLED = os.getenv(
     "LUCKMAIL_PRECHECK_ENABLED", "1"
@@ -181,6 +191,119 @@ _luckmail_client = None
 _luckmail_token_by_email: Dict[str, str] = {}
 
 
+def _split_csv_values(raw: str) -> List[str]:
+    values: List[str] = []
+    seen = set()
+    for chunk in str(raw or "").split(","):
+        value = chunk.strip()
+        if not value:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _optional_csv_values(raw: str) -> List[Optional[str]]:
+    values = _split_csv_values(raw)
+    if not values:
+        return [None]
+    return values
+
+
+def _format_luckmail_selector(email_type: Optional[str], domain: Optional[str]) -> str:
+    et = email_type or "auto"
+    dm = domain or "auto"
+    return f"type={et}, domain={dm}"
+
+
+def _get_luckmail_project_stock_map(client) -> Dict[str, int]:
+    stock_map: Dict[str, int] = {}
+    try:
+        projects = client.user.get_projects(page=1, page_size=500)
+        project_list = getattr(projects, "list", []) or []
+        target = None
+        for item in project_list:
+            code = str(getattr(item, "code", "") or "").strip().lower()
+            if code == LUCKMAIL_PROJECT_CODE.lower():
+                target = item
+                break
+        if not target:
+            return stock_map
+        for price in getattr(target, "prices", []) or []:
+            email_type = str(getattr(price, "email_type", "") or "").strip()
+            if not email_type:
+                continue
+            raw_stock = getattr(price, "stock", 0)
+            try:
+                stock = int(raw_stock)
+            except Exception:
+                stock = 0
+            stock_map[email_type] = stock
+    except Exception as e:
+        print(f"[Warn] LuckMail 获取项目库存失败: {e}")
+    return stock_map
+
+
+def _build_luckmail_purchase_plan(stock_map: Dict[str, int]) -> List[tuple]:
+    type_candidates: List[Optional[str]] = _optional_csv_values(LUCKMAIL_EMAIL_TYPE)
+    domain_candidates: List[Optional[str]] = _optional_csv_values(LUCKMAIL_DOMAIN)
+    has_explicit_domain = any(v for v in domain_candidates if v)
+
+    if stock_map:
+        stock_summary = ", ".join(f"{k}:{v}" for k, v in sorted(stock_map.items()))
+        print(
+            f"[*] LuckMail 项目库存 ({LUCKMAIL_PROJECT_CODE}): {stock_summary}"
+        )
+
+    if stock_map and LUCKMAIL_AUTO_SWITCH_EMAIL_TYPE:
+        configured_set = {v for v in type_candidates if v}
+        stocked_types = [k for k, v in sorted(stock_map.items()) if int(v) > 0]
+        if stocked_types:
+            if configured_set:
+                # 保留用户优先级，同时补上有库存类型作为降级兜底
+                for t in stocked_types:
+                    if t not in configured_set:
+                        type_candidates.append(t)
+            else:
+                type_candidates = stocked_types
+
+    if LUCKMAIL_AUTO_SWITCH_EMAIL_TYPE:
+        non_none_types = {v for v in type_candidates if v}
+        # 微软通用类型在实测中经常比固定 ms_imap/ms_graph 更容易命中可用库存。
+        if "microsoft" not in non_none_types:
+            type_candidates.append("microsoft")
+        # 兜底让 LuckMail 自行分配类型/后缀，避免用户手工限定过窄。
+        if None not in type_candidates:
+            type_candidates.append(None)
+
+        if LUCKMAIL_ALLOW_DOMAIN_AUTO_FALLBACK or not has_explicit_domain:
+            if None not in domain_candidates:
+                domain_candidates.append(None)
+        elif has_explicit_domain:
+            print(
+                "[*] LuckMail 已启用严格后缀模式：仅尝试配置中的 domain，不使用 auto 后缀。"
+            )
+
+    if stock_map:
+        selected_types = [v for v in type_candidates if v]
+        if selected_types and all(int(stock_map.get(t, 0)) <= 0 for t in selected_types):
+            print(
+                "[Warn] 当前配置的 LuckMail 邮箱类型库存为 0，建议在面板切换邮箱类型/后缀后再试。"
+            )
+
+    plan = list(product(type_candidates, domain_candidates))
+    if not plan:
+        plan = [(None, None)]
+
+    if len(plan) > 1:
+        readable = " | ".join(_format_luckmail_selector(t, d) for t, d in plan)
+        print(f"[*] LuckMail 候选下单组合: {readable}")
+
+    return plan
+
+
 def _get_luckmail_client():
     global _luckmail_client
     if _luckmail_client is not None:
@@ -221,17 +344,61 @@ def get_email_and_token(proxies: Any = None) -> tuple:
     if EMAIL_MODE == "luckmail":
         try:
             client = _get_luckmail_client()
-            max_attempts = max(1, int(LUCKMAIL_PURCHASE_MAX_ATTEMPTS or 1))
-            for purchase_attempt in range(1, max_attempts + 1):
-                result = client.user.purchase_emails(
-                    project_code=LUCKMAIL_PROJECT_CODE,
-                    quantity=1,
-                    email_type=LUCKMAIL_EMAIL_TYPE or None,
-                    domain=LUCKMAIL_DOMAIN or None,
+            stock_map = _get_luckmail_project_stock_map(client)
+            purchase_plan = _build_luckmail_purchase_plan(stock_map)
+
+            all_zero_stock = bool(stock_map) and all(
+                int(v) <= 0 for v in stock_map.values()
+            )
+            if all_zero_stock:
+                if LUCKMAIL_STOCK_HARD_BLOCK:
+                    print(
+                        "[Error] LuckMail 当前项目各邮箱类型库存均为 0，按配置停止下单。"
+                    )
+                    print(
+                        "[Tip] 请在 LuckMail 控制台点击“查看后缀”，调整邮箱类型与后缀后再试。"
+                    )
+                    return "", ""
+                print(
+                    "[Warn] LuckMail API 返回库存全 0，但该字段可能与网页口径不一致，将继续按候选组合实单探测。"
                 )
+
+            configured_attempts = max(1, int(LUCKMAIL_PURCHASE_MAX_ATTEMPTS or 1))
+            max_attempts = max(configured_attempts, len(purchase_plan))
+            if max_attempts > configured_attempts:
+                print(
+                    f"[*] LuckMail 尝试次数提升为 {max_attempts}，以覆盖全部候选组合"
+                )
+            for purchase_attempt in range(1, max_attempts + 1):
+                email_type, domain = purchase_plan[(purchase_attempt - 1) % len(purchase_plan)]
+                selector = _format_luckmail_selector(email_type, domain)
+
+                try:
+                    result = client.user.purchase_emails(
+                        project_code=LUCKMAIL_PROJECT_CODE,
+                        quantity=1,
+                        email_type=email_type,
+                        domain=domain,
+                    )
+                except Exception as purchase_err:
+                    err_code = getattr(purchase_err, "code", None)
+                    if err_code == 2003:
+                        print(
+                            f"[Warn] LuckMail 无库存 ({selector})，尝试下一个组合..."
+                        )
+                        if purchase_attempt < max_attempts:
+                            time.sleep(0.4)
+                            continue
+                        print("[Error] LuckMail 候选组合已全部尝试，均返回无库存(2003)")
+                        print(
+                            "[Tip] 这通常是接口库存口径差异或当前账号可购库存为空，请切换后缀/类型或改用 JWT 用户接口重试。"
+                        )
+                        return "", ""
+                    raise
+
                 purchases = (result or {}).get("purchases") or []
                 if not purchases:
-                    print(f"[Error] LuckMail 购买邮箱返回为空: {result}")
+                    print(f"[Error] LuckMail 购买邮箱返回为空 ({selector}): {result}")
                     return "", ""
 
                 item = purchases[0] or {}
@@ -243,7 +410,7 @@ def get_email_and_token(proxies: Any = None) -> tuple:
                     return "", ""
 
                 print(
-                    f"[*] LuckMail 购买邮箱成功: {email} (attempt {purchase_attempt}/{max_attempts})"
+                    f"[*] LuckMail 购买邮箱成功: {email} ({selector}, attempt {purchase_attempt}/{max_attempts})"
                 )
 
                 if not LUCKMAIL_PRECHECK_ENABLED:
@@ -290,6 +457,8 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             return "", ""
         except Exception as e:
             print(f"[Error] LuckMail 获取邮箱失败: {e}")
+            if "API Error [2003]" in str(e):
+                print("[Tip] 官方提示为无库存时，请切换邮箱类型和邮箱后缀（域名）后重试。")
             return "", ""
 
     if EMAIL_MODE == "gmail":
@@ -2562,7 +2731,11 @@ def main() -> None:
     elif EMAIL_MODE == "gmail":
         mode_label = f"Gmail 别名 + 手动输入验证码 ({GMAIL_BASE}@gmail.com)"
     elif EMAIL_MODE == "luckmail":
-        mode_label = f"LuckMail 购买邮箱自动接码 ({LUCKMAIL_BASE_URL}, project={LUCKMAIL_PROJECT_CODE})"
+        mode_label = (
+            "LuckMail 购买邮箱自动接码 "
+            f"({LUCKMAIL_BASE_URL}, project={LUCKMAIL_PROJECT_CODE}, "
+            f"type={LUCKMAIL_EMAIL_TYPE or 'auto'}, domain={LUCKMAIL_DOMAIN or 'auto'})"
+        )
     else:
         mode_label = "Hotmail007 API (微软邮箱)"
     print(f"  邮箱模式: {mode_label}")

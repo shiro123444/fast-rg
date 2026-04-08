@@ -389,6 +389,16 @@ def _provider_mode(provider: str) -> str:
     return mapping.get(normalized, "luckmail")
 
 
+def _env_string(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value]
+        parts = [item for item in parts if item]
+        return ",".join(parts)
+    return str(value).strip()
+
+
 def _build_child_env(
     conf: Dict[str, Any], provider: str, pool: Dict[str, Any]
 ) -> Dict[str, str]:
@@ -417,8 +427,11 @@ def _build_child_env(
             ("project_code", "LUCKMAIL_PROJECT_CODE"),
             ("email_type", "LUCKMAIL_EMAIL_TYPE"),
             ("domain", "LUCKMAIL_DOMAIN"),
+            ("auto_switch_email_type", "LUCKMAIL_AUTO_SWITCH_EMAIL_TYPE"),
+            ("allow_domain_auto_fallback", "LUCKMAIL_ALLOW_DOMAIN_AUTO_FALLBACK"),
+            ("stock_hard_block", "LUCKMAIL_STOCK_HARD_BLOCK"),
         ]:
-            value = str(luckmail.get(src) or "").strip()
+            value = _env_string(luckmail.get(src))
             if value:
                 env[dst] = value
 
@@ -502,49 +515,118 @@ def run_registration_batch(
     provider = str(
         pick_conf(conf, "mail", "provider", default="luckmail") or "luckmail"
     )
-    cmd = _build_registration_cmd(conf, target_count)
     env = _build_child_env(conf, provider, pool)
-
-    logger.info("注册命令: %s", " ".join(cmd))
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(PROJECT_ROOT),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        env=env,
+    pool_name = str(pool.get("name") or "pool")
+    retry_rounds = int(
+        pick_conf(
+            conf,
+            "maintainer",
+            "register_retry_rounds",
+            "register_retry_attempts",
+            default=3,
+        )
+        or 3
     )
+    retry_rounds = max(1, retry_rounds)
+    retry_backoff = float(
+        pick_conf(conf, "maintainer", "register_retry_backoff_seconds", default=3)
+        or 3
+    )
+    retry_backoff = max(0.0, retry_backoff)
 
-    success = 0
-    failed = 0
-    skipped = 0
-    summary_success: Optional[int] = None
+    target_total = max(1, int(target_count))
+    remaining = target_total
+    total_success = 0
+    total_failed = 0
+    total_skipped = 0
+
     success_re = re.compile(r"共成功:\s*(\d+)")
 
-    if proc.stdout is not None:
-        for line in proc.stdout:
-            text = line.rstrip("\n")
-            logger.info(text)
-            if "注册成功" in text:
-                success += 1
-            if "本次注册失败" in text:
-                failed += 1
-            if "邮箱队列已用完" in text or "达到补号目标" in text:
-                skipped += 1
-            match = success_re.search(text)
-            if match:
-                summary_success = int(match.group(1))
+    for attempt in range(1, retry_rounds + 1):
+        if remaining <= 0:
+            break
 
-    returncode = proc.wait()
-    if summary_success is not None:
-        success = max(success, summary_success)
-    target = max(1, int(target_count))
-    if success + failed < target:
-        failed = max(failed, target - success)
-    if returncode != 0:
-        logger.warning("注册进程退出码异常: %s", returncode)
-    return success, failed, skipped
+        cmd = _build_registration_cmd(conf, remaining)
+        logger.info(
+            "[池:%s] 补号尝试 %s/%s, 本次目标 token=%s",
+            pool_name,
+            attempt,
+            retry_rounds,
+            remaining,
+        )
+        logger.info("注册命令: %s", " ".join(cmd))
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+        run_success = 0
+        run_failed = 0
+        run_skipped = 0
+        summary_success: Optional[int] = None
+
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                text = line.rstrip("\n")
+                logger.info(text)
+                if "注册成功" in text:
+                    run_success += 1
+                if "本次注册失败" in text:
+                    run_failed += 1
+                if "邮箱队列已用完" in text or "达到补号目标" in text:
+                    run_skipped += 1
+                match = success_re.search(text)
+                if match:
+                    summary_success = int(match.group(1))
+
+        returncode = proc.wait()
+        if summary_success is not None:
+            run_success = max(run_success, summary_success)
+        run_target = max(1, int(remaining))
+        if run_success + run_failed < run_target:
+            run_failed = max(run_failed, run_target - run_success)
+        if returncode != 0:
+            logger.warning("注册进程退出码异常: %s", returncode)
+
+        total_success += run_success
+        total_failed += run_failed
+        total_skipped += run_skipped
+        remaining = max(0, target_total - total_success)
+
+        if remaining <= 0:
+            break
+
+        logger.warning(
+            "[池:%s] 本次补号未达标，累计 token=%s/%s，fail=%s，skip=%s",
+            pool_name,
+            total_success,
+            target_total,
+            total_failed,
+            total_skipped,
+        )
+        if attempt < retry_rounds and retry_backoff > 0:
+            logger.info(
+                "[池:%s] %.1fs 后继续重试补号",
+                pool_name,
+                retry_backoff,
+            )
+            time.sleep(retry_backoff)
+
+    if remaining > 0:
+        logger.warning(
+            "[池:%s] 达到最大补号尝试轮次(%s)，本轮仍缺 token=%s",
+            pool_name,
+            retry_rounds,
+            remaining,
+        )
+
+    return total_success, total_failed, total_skipped
 
 
 def _enabled_pools(conf: Dict[str, Any]) -> List[Dict[str, Any]]:

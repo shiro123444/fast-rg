@@ -58,6 +58,11 @@ name=backup;base_url=http://1.2.3.4:8317;token=yyyy;target_type=codex;min_candid
 - 购买邮箱后，注册前先调用 `check_token_alive` 进行可用性检测
 - 检测失败自动重买，不进入注册流程
 - 超时收不到 OTP（默认 60 秒）会触发重买并立即重试
+- 下单前会读取项目库存（按邮箱类型），库存为 0 时会给出提示
+- 支持邮箱类型/后缀多候选回退（逗号分隔，按顺序尝试）
+- `auto_switch_email_type` 开启时，会在有库存的类型中自动补充兜底尝试
+- `allow_domain_auto_fallback` 可控制是否追加 `domain=auto` 兜底（默认关闭，尊重你手工指定后缀）
+- `stock_hard_block` 可控制“库存全 0”是否立即停止：默认继续实单探测，避免接口口径误判
 
 可配置项（`.env`）：
 
@@ -66,7 +71,14 @@ LUCKMAIL_OTP_TIMEOUT=60
 LUCKMAIL_PRECHECK_ENABLED=1
 LUCKMAIL_PRECHECK_RETRIES=2
 LUCKMAIL_PURCHASE_MAX_ATTEMPTS=6
+LUCKMAIL_EMAIL_TYPE=ms_imap,ms_graph
+LUCKMAIL_DOMAIN=hotmail.com,outlook.com
+LUCKMAIL_AUTO_SWITCH_EMAIL_TYPE=1
+LUCKMAIL_ALLOW_DOMAIN_AUTO_FALLBACK=0
+LUCKMAIL_STOCK_HARD_BLOCK=0
 ```
+
+前端/`config.json` 的 `luckmail.email_type` 与 `luckmail.domain` 同样支持逗号分隔字符串或数组值。
 
 ## 快速启动
 
@@ -135,6 +147,8 @@ python api_server.py
 - `clean.base_url` / `clean.token`: CPA 管理接口地址和密钥
 - `maintainer.min_candidates`: 最小候选号池
 - `maintainer.loop_interval_seconds`: 循环补号间隔
+- `maintainer.register_retry_rounds`: 单轮补号失败后的重试轮次（默认 3）
+- `maintainer.register_retry_backoff_seconds`: 补号重试间隔秒数（默认 3）
 - `run.workers`: 补号时传给 `gpt.py` 的并发线程
 - `run.proxy` / `run.proxy_file`: 代理
 - `mail.provider`: 邮箱模式

@@ -38,10 +38,10 @@ service_command() {
   local cmd=""
   case "$service" in
     backend)
-      printf -v cmd 'cd %q && exec %q api_server.py' "$PROJECT_ROOT" "python"
+      printf -v cmd 'cd %q && exec env APP_HOST=0.0.0.0 %q api_server.py' "$PROJECT_ROOT" "python3"
       ;;
     frontend)
-      printf -v cmd 'cd %q && exec pnpm run dev -- --host 127.0.0.1 --port 8173' "$PROJECT_ROOT/frontend"
+      printf -v cmd 'cd %q && exec pnpm exec vite --host 0.0.0.0 --port 8173 --strictPort' "$PROJECT_ROOT/frontend"
       ;;
     *)
       echo "未知服务: $service" >&2
